@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Generated sites and Caddy state (see OUTPUT_DIR)
+/build/
+/caddy-data/
+/caddy-config/
+
+# Local overrides
+.env
+domains.json

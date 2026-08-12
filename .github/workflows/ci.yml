@@ -1,0 +1,72 @@
+# CI runs the same `make` targets a developer runs, and they all run in
+# containers. Nothing here installs a Python or Go toolchain on the runner: a
+# workflow that built its own environment would be testing an environment
+# nobody else has.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# A new push to a branch makes the previous run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # ruff, pylint, and `caddy validate` against the real image.
+      - name: Lint
+        run: make lint-check
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Unit tests
+        run: make test
+
+      - name: Generate the pages
+        run: make build
+
+  vendor:
+    name: Vendored certmagic-s3
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # gofmt, go vet, go test -race. The locking is concurrent by nature — a
+      # refresher goroutine per held lock, several instances on one bucket.
+      - name: Go tests
+        run: make vendor-test
+
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    # Caddy is compiled from source with xcaddy, and the stack waits on
+    # certificate issuance.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      # KEEP_UP stops the script's exit trap from removing the containers, so
+      # the log dump below still has something to read. The runner is thrown
+      # away either way.
+      - name: End-to-end tests
+        run: KEEP_UP=1 make test-e2e
+
+      - name: Dump the container logs
+        if: failure()
+        run: docker compose logs --no-color

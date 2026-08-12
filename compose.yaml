@@ -1,0 +1,118 @@
+# Two containers sharing one volume: the builder writes pages into it, Caddy
+# serves them. They never talk to each other — the directory tree is the whole
+# interface, and Caddy's config is static, so nothing needs reloading.
+#
+# Both run unprivileged on 8080/8443; the host publishes the real ports.
+#
+# RustFS stands in for S3 locally, so `make run` and the end-to-end test
+# exercise the real certificate-storage path rather than a stub. In production
+# point S3_ENDPOINT at the actual store, or leave it empty for AWS.
+
+services:
+  builder:
+    build:
+      context: .
+      target: builder
+    restart: unless-stopped
+    environment:
+      DOMAINS_URL: ${DOMAINS_URL:-file:///domains/domains.json}
+      REBUILD_INTERVAL: ${REBUILD_INTERVAL:-300}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Credentials for s3:// domain lists. Set AWS_ENDPOINT_URL for any
+      # S3-compatible store.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-}
+    volumes:
+      - sites:/srv/sites
+      # Only needed for the file:// default above.
+      - ./domains.example.json:/domains/domains.json:ro
+
+  # Development tooling: the same dependencies as the builder, on Debian with a
+  # shell and the dev extras. Every Makefile target that runs Python — the
+  # tests, the linters, a local page build — goes through this. There is no
+  # host toolchain to install and none to drift.
+  #
+  # Behind a profile so `docker compose up` ignores it; `run` enables it.
+  builder-dev:
+    build:
+      context: .
+      target: runtime-dev
+    profiles: [tools]
+    # Files land in the working tree, so they have to belong to whoever ran make.
+    user: ${DOCKER_USER:-1000:1000}
+    environment:
+      # ruff, pylint and pytest all want somewhere to cache.
+      HOME: /tmp
+      PYTHONDONTWRITEBYTECODE: 1
+    volumes:
+      - .:/app
+
+  # Creates the certificate bucket in RustFS, then exits. Development only —
+  # a real deployment provisions its bucket out of band.
+  bucket-init:
+    build:
+      context: .
+      target: builder
+    depends_on:
+      - rustfs
+    entrypoint: ["python", "/scripts/ensure_bucket.py"]
+    restart: "no"
+    environment:
+      S3_BUCKET: ${S3_BUCKET:-caddy-certs}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://rustfs:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-rustfsadmin}
+    volumes:
+      - ./scripts:/scripts:ro
+
+  caddy:
+    build:
+      context: ./caddy
+    restart: unless-stopped
+    depends_on:
+      bucket-init:
+        condition: service_completed_successfully
+    ports:
+      - "${HTTP_BIND:-8080}:8080"
+      - "${HTTPS_BIND:-8443}:8443"
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      CACHE_MAX_AGE: ${CACHE_MAX_AGE:-300}
+      # Empty means the real ACME issuer. Defaults that way on purpose: the
+      # failure mode is "local HTTPS needs DNS", not "production quietly
+      # serves untrusted certificates". `make test-e2e` sets it to internal.
+      CADDY_TLS_ISSUER: ${CADDY_TLS_ISSUER:-}
+      # Certificate storage. Empty S3_ENDPOINT means real AWS.
+      S3_BUCKET: ${S3_BUCKET:-caddy-certs}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://rustfs:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-rustfsadmin}
+      S3_PREFIX: ${S3_PREFIX:-caddy}
+      S3_ENCRYPTION_KEY: ${S3_ENCRYPTION_KEY:-}
+    volumes:
+      - sites:/srv/sites:ro
+      # Certificates live in S3; this only holds Caddy's config autosave.
+      - caddy-config:/config
+
+  # S3-compatible store, for local development and the end-to-end test only.
+  rustfs:
+    image: rustfs/rustfs:latest
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-rustfsadmin}
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_VOLUMES: /data
+    ports:
+      - "${S3_BIND:-9000}:9000"
+    volumes:
+      - rustfs-data:/data
+
+volumes:
+  sites:
+  caddy-config:
+  rustfs-data:

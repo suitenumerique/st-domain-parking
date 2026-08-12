@@ -1,0 +1,106 @@
+[project]
+name = "st-domain-parking"
+version = "0.1.0"
+authors = [{ "name" = "ANCT", "email" = "contact@suite.anct.gouv.fr" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Natural Language :: French",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+]
+description = "Static domain parking pages, generated from a JSON file and served by Caddy"
+keywords = ["Caddy", "parking", "static", "domains"]
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.13,<4.0"
+
+dependencies = [
+    "boto3==1.42.53",
+    "botocore==1.42.53",
+    "brotli==1.1.0",
+    "jinja2==3.1.6",
+    # The stylesheet is minified here rather than by minify-html, whose Python
+    # binding exposes no browser targets: without them the CSS is rewritten to
+    # whatever syntax is current and older browsers drop the rules outright.
+    "lightningcss==0.3.1",
+    "minify-html==0.16.4",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/suitenumerique/st-domain-parking"
+"Repository" = "https://github.com/suitenumerique/st-domain-parking"
+
+[project.optional-dependencies]
+dev = [
+    "pylint==4.0.4",
+    "pytest==9.0.3",
+    "pytest-cov==7.0.0",
+    "pytest-icdiff==0.9",
+    "ruff==0.15.2",
+]
+
+[project.scripts]
+st-domain-parking = "builder.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.10.0,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+module-name = "builder"
+source-include = ["builder/**"]
+source-exclude = ["builder/tests/**"]
+
+[tool.ruff]
+target-version = "py313"
+exclude = [
+    ".git",
+    ".venv",
+    "build",
+    "venv",
+    "__pycache__",
+]
+line-length = 88
+
+[tool.ruff.lint]
+ignore = ["PLC0415", "PLR2004", "PLR0915", "PLR0912", "PLR0913", "PLR0911", "BLE001"]
+select = [
+    "B",
+    "BLE",
+    "C4",
+    "I",
+    "PLC",
+    "PLE",
+    "PLR",
+    "PLW",
+    "RUF100",
+    "RUF200",
+    "S",
+    "SLF",
+    "T20",
+    "F",
+]
+
+[tool.ruff.lint.isort]
+section-order = ["future", "standard-library", "third-party", "builder", "first-party", "local-folder"]
+sections = { builder = ["builder"] }
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/*" = ["S", "SLF"]
+# Standalone command-line helpers: stdout is their interface, not logging.
+"scripts/*" = ["T20"]
+
+[tool.pytest.ini_options]
+addopts = [
+    "-v",
+    "--cov-report",
+    "term-missing",
+    "--import-mode=importlib",
+]
+python_files = [
+    "test_*.py",
+    "tests.py",
+]

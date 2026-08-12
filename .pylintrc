@@ -1,0 +1,121 @@
+[MASTER]
+
+# A comma-separated list of package or module names from where C extensions may
+# be loaded. minify_html and lightningcss are Rust extension modules, so their
+# members are only visible once they are imported.
+extension-pkg-whitelist=minify_html,lightningcss
+
+# Add files or directories to the blacklist. They should be base names, not
+# paths.
+ignore=.venv,tests
+
+# Use multiple processes to speed up Pylint. Specifying 0 will auto-detect the
+# number of processors available to use.
+jobs=0
+
+# Pickle collected data for later comparisons.
+persistent=yes
+
+
+[MESSAGES CONTROL]
+
+disable=bad-inline-option,
+        deprecated-pragma,
+        file-ignored,
+        locally-disabled,
+        raw-checker-failed,
+        suppressed-message,
+        useless-suppression,
+        fixme,
+        cyclic-import
+
+enable=c-extension-no-member
+
+
+[REPORTS]
+
+output-format=text
+reports=no
+score=yes
+
+
+[LOGGING]
+
+logging-modules=logging
+
+
+[MISCELLANEOUS]
+
+notes=FIXME,
+      XXX,
+      TODO
+
+
+[FORMAT]
+
+# Regexp for a line that is allowed to be longer than the limit.
+ignore-long-lines=^\s*(#\s*)?<?https?://\S+>?$
+
+indent-after-paren=4
+indent-string='    '
+max-line-length=120
+max-module-lines=1000
+
+
+[BASIC]
+
+argument-naming-style=snake_case
+attr-naming-style=snake_case
+class-attribute-naming-style=any
+class-naming-style=PascalCase
+const-naming-style=UPPER_CASE
+const-rgx=(([A-Z_][A-Z0-9_]*)|(__.*__)|logger)$
+function-naming-style=snake_case
+method-naming-style=snake_case
+module-naming-style=snake_case
+variable-naming-style=snake_case
+
+bad-names=foo,
+          bar,
+          baz,
+          toto,
+          tutu,
+          tata
+
+good-names=i,
+           j,
+           k,
+           ex,
+           Run,
+           _
+
+# Regular expression which should only match function or class names that do
+# not require a docstring.
+no-docstring-rgx=^_
+
+
+[VARIABLES]
+
+dummy-variables-rgx=_+$|(_[a-zA-Z0-9_]*[a-zA-Z0-9]+?$)|dummy|^ignored_|^unused_
+ignored-argument-names=_.*|^ignored_|^unused_
+init-import=no
+
+
+[DESIGN]
+
+max-args=10
+max-positional-arguments=15
+max-attributes=10
+max-bool-expr=5
+max-branches=35
+max-locals=35
+max-parents=10
+max-public-methods=20
+max-returns=15
+max-statements=120
+min-public-methods=0
+
+
+[EXCEPTIONS]
+
+overgeneral-exceptions=builtins.Exception

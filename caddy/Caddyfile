@@ -1,0 +1,136 @@
+# Static configuration: never regenerated, never reloaded.
+#
+# The set of parked domains is expressed purely on the filesystem. For every
+# host it serves, the builder creates <OUTPUT_DIR>/<host>/ containing a
+# `.parked` marker; the canonical host additionally gets index.html and its
+# pre-compressed variants. Adding or removing a domain is therefore a pure
+# file operation — Caddy picks it up on the next request with no reload.
+
+{
+	admin off
+	# Quoted so an unset ACME_EMAIL still expands to one (empty) token, which
+	# Caddy reads as "register without a contact address". Same trick for every
+	# optional value below: without the quotes an empty variable expands to no
+	# token at all and the directive fails to parse.
+	email "{$ACME_EMAIL}"
+	http_port {$HTTP_PORT:80}
+	https_port {$HTTPS_PORT:443}
+
+	# Certificates live in S3, not on a local disk, so instances are
+	# interchangeable and a rebuilt container does not re-issue everything.
+	# Backed by our vendored certmagic-s3 (see certmagic-s3/VENDORED.md).
+	storage s3 {
+		bucket "{$S3_BUCKET}"
+		region "{$S3_REGION:us-east-1}"
+		# Empty for real AWS; set it for MinIO, RustFS, Scaleway, Garage, ...
+		endpoint "{$S3_ENDPOINT}"
+		access_key "{$S3_ACCESS_KEY}"
+		secret_key "{$S3_SECRET_KEY}"
+		prefix "{$S3_PREFIX:caddy}"
+		# Optional client-side encryption of the stored keys. Exactly 32 bytes
+		# when set; empty leaves them in clear text.
+		encryption_key "{$S3_ENCRYPTION_KEY}"
+	}
+
+	# Certificates are issued lazily, but only for hosts the builder has
+	# actually written out (see the allowlist endpoint below). Without that
+	# gate, anyone pointing a DNS record at this server could burn through
+	# the ACME rate limits.
+	on_demand_tls {
+		ask http://127.0.0.1:{$ASK_PORT:9000}/check
+	}
+}
+
+# Internal allowlist endpoint. Caddy asks itself, during the TLS handshake,
+# whether a directory exists for the host being negotiated. Bound to loopback
+# only, so it is not reachable from outside the container.
+http://127.0.0.1:{$ASK_PORT:9000} {
+	root * {$OUTPUT_DIR:/srv/sites}
+
+	@parked file /{query.domain}/.parked
+	respond @parked 200
+
+	respond 404
+}
+
+# Everything on plain HTTP goes to HTTPS. ACME HTTP-01 challenges are handled
+# by Caddy ahead of this route.
+#
+# Every redirect here is temporary, on purpose: parking is a placeholder the
+# owner is expected to replace with a real site, and a 301 would sit in
+# browser caches long after that happened.
+http:// {
+	redir https://{host}{uri} 302
+}
+
+https:// {
+	# Empty expands to `tls {`, the real ACME issuer. Set CADDY_TLS_ISSUER to
+	# `internal` to use Caddy's local CA instead — the end-to-end test does
+	# that, since no public DNS points here.
+	tls {$CADDY_TLS_ISSUER} {
+		on_demand
+	}
+
+	root * {$OUTPUT_DIR:/srv/sites}
+
+	@parked file /{host}/.parked
+	handle @parked {
+		# One `route` for the whole block: inside it directives run in written
+		# order, whereas Caddy would otherwise sort `redir` ahead of `handle`
+		# and the catch-all redirect would swallow the two carve-outs below.
+		route {
+			# Apex to www, in one hop: every path collapses to the root anyway.
+			@apex expression !{host}.startsWith("www.")
+			redir @apex https://www.{host}/ 302
+
+			# The page carries its icon as an inline data URI, so there is no
+			# file to serve. 204 stops browsers that ask anyway from retrying,
+			# which a redirect to an HTML page would not.
+			handle /favicon.ico {
+				respond 204
+			}
+
+			# Served rather than redirected: crawlers treat a redirected
+			# robots.txt as absent.
+			#
+			# Crawling is deliberately allowed even though the page is
+			# noindex. Disallowing it here would stop crawlers ever reading
+			# that noindex, and a blocked URL can still be indexed bare —
+			# the opposite of what we want.
+			handle /robots.txt {
+				header Content-Type "text/plain; charset=utf-8"
+				respond "User-agent: *
+Allow: /
+" 200
+			}
+
+			# A parked domain has exactly one page. Anything else is a
+			# temporary redirect back to it rather than a 404, so stale
+			# inbound links and old bookmarks still land somewhere useful.
+			@subpath not path /
+			redir @subpath / 302
+
+			header {
+				Cache-Control "public, max-age={$CACHE_MAX_AGE:300}"
+				X-Content-Type-Options "nosniff"
+				Referrer-Policy "no-referrer"
+				# The page is entirely self-contained: inline styles, a
+				# data-URI favicon, no scripts, no external requests.
+				Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+				-Server
+			}
+
+			rewrite * /{host}/index.html
+			file_server {
+				precompressed br gzip
+			}
+		}
+	}
+
+	# Unknown host: a certificate may exist from an earlier build, but the
+	# domain is no longer parked here.
+	handle {
+		header -Server
+		respond 404
+	}
+}
