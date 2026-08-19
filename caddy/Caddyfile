@@ -5,7 +5,6 @@
 # `.parked` marker; the canonical host additionally gets index.html and its
 # pre-compressed variants. Adding or removing a domain is therefore a pure
 # file operation — Caddy picks it up on the next request with no reload.
-
 {
 	admin off
 	# Quoted so an unset ACME_EMAIL still expands to one (empty) token, which

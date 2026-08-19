@@ -10,7 +10,6 @@ ARG CADDY_VERSION=2.11.4
 
 # ---- Build Caddy with the storage plugin ----
 FROM caddy:${CADDY_VERSION}-builder AS build
-ARG CADDY_VERSION
 
 WORKDIR /src
 COPY certmagic-s3/ ./certmagic-s3/
@@ -18,7 +17,8 @@ COPY certmagic-s3/ ./certmagic-s3/
 # `--with <module>=<dir>` rewrites the import to this directory, so what ships
 # is what is in the repo. CGO stays off: the result has to run on distroless.
 ENV CGO_ENABLED=0
-RUN xcaddy build v${CADDY_VERSION} \
+# The builder image exports CADDY_VERSION=v<version>, which xcaddy reads by default.
+RUN xcaddy build \
     --output /out/caddy \
     --with github.com/techknowlogick/certmagic-s3=/src/certmagic-s3
 
