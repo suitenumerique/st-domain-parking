@@ -33,6 +33,13 @@ def test_a_valid_entry_round_trips(tmp_path):
     assert site.siret == "21510372200017"
 
 
+def test_a_gouv_fr_service_public_url_is_accepted(tmp_path):
+    url = "https://lannuaire.service-public.gouv.fr/mairie-87030-01"
+    (site,) = load(write(tmp_path, [{**VALID, "service_public_url": url}]))
+
+    assert site.service_public_url == url
+
+
 def test_a_bare_list_is_accepted(tmp_path):
     sites = load(write(tmp_path, [VALID, {**VALID, "domain": "other.fr"}]))
 

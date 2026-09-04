@@ -39,8 +39,8 @@ PATTERNS = {
     "email": (r"^[^@\s<>\"']+@[^@\s<>\"']+\.[a-z]{2,}$", "an email address"),
     "siret": (r"^\d{14}$", "14 digits"),
     "service_public_url": (
-        r"^https://lannuaire\.service-public\.fr/[\w\-./]+$",
-        "a lannuaire.service-public.fr URL",
+        r"^https://lannuaire\.service-public(\.gouv)?\.fr/[\w\-./]+$",
+        "a lannuaire.service-public[.gouv].fr URL",
     ),
 }
 
@@ -66,7 +66,7 @@ class Site:
     commune_name: str
     commune_zipcode: str
     email: str
-    #: Listing on lannuaire.service-public.fr.
+    #: Listing on lannuaire.service-public.fr or lannuaire.service-public.gouv.fr.
     service_public_url: str
     siret: str
 
