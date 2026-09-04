@@ -205,7 +205,7 @@ vendor drop cannot ship silently.
       "commune_name": "Brigny",
       "commune_zipcode": "87200",
       "email": "contact@brigny.fr",
-      "service_public_url": "https://lannuaire.service-public.fr/nouvelle-aquitaine/haute-vienne/mairie-87030-01",
+      "service_public_url": "https://lannuaire.service-public.gouv.fr/nouvelle-aquitaine/haute-vienne/mairie-87030-01",
       "siret": "21870030000013"
     }
   ]
@@ -218,7 +218,8 @@ A bare list of domain objects is also accepted.
 entry would render a page with gaps in it, which is worse than a build that
 refuses to run. Every value is validated — the domain as a hostname, the
 zipcode as 5 digits, the SIRET as 14, the email as an address, and
-`service_public_url` as a `lannuaire.service-public.fr` URL. One bad entry
+`service_public_url` as a `lannuaire.service-public.gouv.fr` URL (the
+pre-move `lannuaire.service-public.fr` form is also accepted). One bad entry
 fails the whole build.
 
 The page is served from `www.<domain>`; a leading `www.` in the domain list is

@@ -5,7 +5,7 @@
       "commune_name": "Brigny",
       "commune_zipcode": "87200",
       "email": "contact@brigny.fr",
-      "service_public_url": "https://lannuaire.service-public.fr/nouvelle-aquitaine/haute-vienne/mairie-87030-01",
+      "service_public_url": "https://lannuaire.service-public.gouv.fr/nouvelle-aquitaine/haute-vienne/mairie-87030-01",
       "siret": "21870030000013"
     },
     {
@@ -13,7 +13,7 @@
       "commune_name": "Sainte-Anne-sur-Vilaine",
       "commune_zipcode": "35390",
       "email": "mairie@sainte-anne-sur-vilaine.fr",
-      "service_public_url": "https://lannuaire.service-public.fr/bretagne/ille-et-vilaine/mairie-35256-01",
+      "service_public_url": "https://lannuaire.service-public.gouv.fr/bretagne/ille-et-vilaine/mairie-35256-01",
       "siret": "21350256000015"
     }
   ]
