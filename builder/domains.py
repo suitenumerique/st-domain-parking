@@ -97,6 +97,17 @@ def load(url: str) -> list[Site]:
     if not isinstance(entries, list):
         raise DomainsError("expected a list of domains, or an object with `domains`")
 
+    # An empty list is indistinguishable from "every commune was deprovisioned
+    # at once", and acting on it deletes the whole tree: every page 404s, and
+    # with the `.parked` markers gone Caddy stops being allowed to have
+    # certificates for any of them. Recovering means re-issuing the lot,
+    # against the rate limits, long after the feed has been put right. A feed
+    # that empties itself is a bug somewhere upstream far more often than it is
+    # an instruction, so it is refused like any other unusable answer: the
+    # previous build stays on disk and keeps being served.
+    if not entries:
+        raise DomainsError("the domain list is empty, refusing to unpark everything")
+
     sites = [_site(entry, index) for index, entry in enumerate(entries)]
 
     duplicates = {site.domain for site in sites}

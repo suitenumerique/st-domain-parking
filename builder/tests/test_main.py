@@ -145,6 +145,31 @@ def test_a_broken_domain_list_does_not_stop_the_builder(builder):
     assert builder.wait_for_builds(2), "the builder did not recover"
 
 
+def test_an_empty_domain_list_does_not_unpark_everything(builder):
+    """The dangerous shape of a bad feed: valid JSON, fetched fine, and empty.
+
+    Acting on it would delete every page and every `.parked` marker, so Caddy
+    would stop being allowed to hold certificates for domains that are still
+    very much parked.
+    """
+    assert builder.wait_for_builds(1)
+    page = builder.output / "www.brigny.fr" / "index.html"
+    assert page.exists()
+
+    builder.write([])
+    builder.process.send_signal(signal.SIGHUP)
+
+    time.sleep(0.5)
+    assert page.exists(), "an empty feed deleted the pages"
+    assert (builder.output / "www.brigny.fr" / ".parked").exists()
+    assert builder.process.poll() is None, "an empty feed stopped the builder"
+
+    # And it recovers, rather than needing a restart.
+    builder.write([entry("brigny.fr")])
+    builder.process.send_signal(signal.SIGHUP)
+    assert builder.wait_for_builds(2)
+
+
 def test_sigterm_stops_it_promptly(builder):
     assert builder.wait_for_builds(1)
 

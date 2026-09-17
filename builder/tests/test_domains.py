@@ -40,6 +40,16 @@ def test_a_gouv_fr_service_public_url_is_accepted(tmp_path):
     assert site.service_public_url == url
 
 
+@pytest.mark.parametrize("payload", [[], {"domains": []}])
+def test_an_empty_list_is_refused(tmp_path, payload):
+    """Acting on an empty list unparks every domain at once, and the markers
+    it deletes are what let Caddy hold certificates for them. Treated like any
+    other unusable answer, so the previous build keeps being served.
+    """
+    with pytest.raises(DomainsError, match="empty"):
+        load(write(tmp_path, payload))
+
+
 def test_a_bare_list_is_accepted(tmp_path):
     sites = load(write(tmp_path, [VALID, {**VALID, "domain": "other.fr"}]))
 

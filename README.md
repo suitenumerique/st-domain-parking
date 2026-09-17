@@ -222,6 +222,14 @@ zipcode as 5 digits, the SIRET as 14, the email as an address, and
 pre-move `lannuaire.service-public.fr` form is also accepted). One bad entry
 fails the whole build.
 
+**An empty list is refused too.** Removing the last domain would delete every
+page *and* every `.parked` marker, and those markers are what allow Caddy to
+hold certificates at all — so a feed that empties itself for a moment would
+cost a full re-issuance of the estate, against the rate limits, long after the
+feed was put right. An empty answer is treated like an unreachable one: logged,
+skipped, previous build still served. Unparking everything on purpose means
+stopping the service, not emptying the list.
+
 The page is served from `www.<domain>`; a leading `www.` in the domain list is
 stripped, so the two can never disagree. `siret` builds the *Présence
 numérique* link to `suiteterritoriale.anct.gouv.fr/bienvenue/<siret>`.
