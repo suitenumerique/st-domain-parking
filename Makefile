@@ -29,6 +29,9 @@ COMPOSE_RUN         = $(COMPOSE) run --rm --build
 # toolchain to keep in step.
 COMPOSE_RUN_TOOLS   = $(COMPOSE_RUN) --no-deps builder-dev
 
+# -- Go
+GO_IMAGE            = golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
+
 # -- Build
 # Local build target for `make build`: the generated tree is written here so it
 # can be inspected without a container.
@@ -177,7 +180,7 @@ test-e2e: ## run the end-to-end tests (brings the stack up against RustFS)
 # -- Vendored Caddy plugin
 
 vendor-update: ## update, vet and test the vendored certmagic-s3 plugin
-	@docker run --rm -v $(PWD)/caddy/certmagic-s3:/src -w /src golang:1.25 sh -c '\
+	@docker run --rm -v $(PWD)/caddy/certmagic-s3:/src -w /src $(GO_IMAGE) sh -c '\
 		go get -u ./... && go mod tidy && gofmt -l . && go vet ./... && go test -race ./...'
 	@echo "$(BOLD)Re-apply any LOCAL CHANGE hunks upstream has moved under.$(RESET)"
 .PHONY: vendor-update
@@ -185,7 +188,7 @@ vendor-update: ## update, vet and test the vendored certmagic-s3 plugin
 # -race, because the locking this plugin exists for is concurrent by nature:
 # a refresher goroutine per held lock, and several instances on one bucket.
 vendor-test: ## vet and test the vendored certmagic-s3 plugin
-	@docker run --rm -v $(PWD)/caddy/certmagic-s3:/src -w /src golang:1.25 sh -c '\
+	@docker run --rm -v $(PWD)/caddy/certmagic-s3:/src -w /src $(GO_IMAGE) sh -c '\
 		gofmt -l . && go vet ./... && go test -race ./...'
 .PHONY: vendor-test
 

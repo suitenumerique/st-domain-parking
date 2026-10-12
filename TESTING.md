@@ -57,9 +57,12 @@ Concurrency bugs hide from single runs. Before changing anything about
 locking, hammer it:
 
 ```sh
-docker run --rm -v "$PWD/caddy/certmagic-s3":/src -w /src golang:1.25 \
+docker run --rm -v "$PWD/caddy/certmagic-s3":/src -w /src \
+  golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c \
   go test -race -count=50 -run TestOnlyOneInstanceAcquiresALock ./...
 ```
+
+Keep this image the same as `GO_IMAGE` in the Makefile.
 
 ## Tier 3 — before deploying (~13 s warm)
 
