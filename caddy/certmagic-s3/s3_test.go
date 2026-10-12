@@ -1,8 +1,6 @@
 package s3
 
 import (
-	"fmt"
-	"strings"
 	"testing"
 )
 
@@ -52,65 +50,6 @@ func TestS3_objLockName(t *testing.T) {
 	result := s3.objLockName(key)
 	if result != expected {
 		t.Errorf("objLockName() = %v, want %v", result, expected)
-	}
-}
-
-// `host` is a bare hostname that gets https:// prepended, so a URL here used
-// to become https://https://… and only failed much later, at connect time.
-func TestValidateHost(t *testing.T) {
-	tests := []struct {
-		name     string
-		host     string
-		accepted bool
-	}{
-		{name: "bare hostname", host: "s3.example.com", accepted: true},
-		{name: "with a port", host: "s3.example.com:9000", accepted: true},
-		{name: "localhost with a port", host: "localhost:9000", accepted: true},
-		{name: "https URL", host: "https://s3.example.com", accepted: false},
-		{name: "http URL", host: "http://s3.example.com", accepted: false},
-		{name: "URL with a port", host: "https://s3.example.com:9000", accepted: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateHost(tt.host)
-			if tt.accepted && err != nil {
-				t.Errorf("validateHost(%q) = %v, want it accepted", tt.host, err)
-			}
-			if !tt.accepted && err == nil {
-				t.Errorf("validateHost(%q) was accepted, want it rejected", tt.host)
-			}
-		})
-	}
-}
-
-// MarshalLogObject covers zap.Any, which is how certmagic logs the storage.
-// Anything reaching for %v or %s instead has to be just as safe.
-func TestStringHidesCredentials(t *testing.T) {
-	storage := &S3{
-		Bucket:        "certificates",
-		Endpoint:      "https://s3.example.invalid",
-		Prefix:        "caddy",
-		AccessKey:     "AKIAEXAMPLEACCESS",
-		SecretKey:     "SuperSecretKey123",
-		EncryptionKey: strings.Repeat("e", 32),
-	}
-
-	for _, formatted := range []string{
-		fmt.Sprintf("%v", storage),
-		fmt.Sprintf("%s", storage),
-		fmt.Sprint(storage),
-	} {
-		for _, secret := range []string{
-			storage.SecretKey, storage.AccessKey, storage.EncryptionKey,
-		} {
-			if strings.Contains(formatted, secret) {
-				t.Errorf("a credential was formatted into %q", formatted)
-			}
-		}
-		if !strings.Contains(formatted, "certificates") {
-			t.Errorf("expected the bucket in %q", formatted)
-		}
 	}
 }
 

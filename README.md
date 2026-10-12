@@ -178,14 +178,13 @@ into the Let's Encrypt rate limits.
 
 That comes from [certmagic-s3](https://github.com/techknowlogick/certmagic-s3),
 which is **vendored** into `caddy/certmagic-s3/` and compiled in with `xcaddy`
-from local source rather than fetched by version. The reasons, the upstream
-bugs that motivated it, and the local fixes are all in
-[`caddy/certmagic-s3/VENDORED.md`](caddy/certmagic-s3/VENDORED.md) — briefly:
-the latest release deletes the entire bucket during OCSP cleanup
-([#21](https://github.com/techknowlogick/certmagic-s3/issues/21)), and its
-Caddyfile block does not parse
-([#19](https://github.com/techknowlogick/certmagic-s3/issues/19)). Both are
-fixed on master but unreleased, so we build the commit we read.
+from local source rather than fetched by version. The reasons and the local
+changes are in [`caddy/certmagic-s3/VENDORED.md`](caddy/certmagic-s3/VENDORED.md).
+Upstream v1.5.0 fixes the bucket deletion during OCSP cleanup
+([#21](https://github.com/techknowlogick/certmagic-s3/issues/21)) and the
+Caddyfile block that did not parse
+([#19](https://github.com/techknowlogick/certmagic-s3/issues/19)). The vendored
+copy is that release plus four local changes. We build the code we read.
 
 ```sh
 make vendor-test      # gofmt + go vet + go test, in a container

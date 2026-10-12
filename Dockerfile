@@ -4,7 +4,7 @@
 # under /opt/python, dependencies in /venv, and a distroless production
 # runtime with pip/tests/headers stripped out.
 
-ARG PYTHON_VERSION=3.13
+ARG PYTHON_VERSION=3.14.8
 ARG UV_VERSION=0.13.0
 
 # Digests resolved on 2026-10-12.
@@ -57,8 +57,10 @@ ARG PYTHON_VERSION
 
 RUN <<EOR
 set -eu
-root=$(find /opt/python -maxdepth 1 -mindepth 1 -type d)
-lib="${root}/lib/python${PYTHON_VERSION}"
+root=$(find /opt/python -maxdepth 1 -mindepth 1 -type d -name 'cpython-*')
+lib="${root}/lib/python$(printf '%s' "${PYTHON_VERSION}" | cut -d. -f1,2)"
+# Fail the build here: rm -rf below would pass silently on a wrong path.
+[ -d "${lib}" ]
 rm -rf \
     "${lib}/test" \
     "${lib}/idlelib" \

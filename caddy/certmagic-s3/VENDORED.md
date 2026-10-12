@@ -1,124 +1,126 @@
 # Vendored: certmagic-s3
 
 CertMagic storage backend that keeps Caddy's certificates in S3 instead of on
-local disk. Vendored here rather than pulled by version so that we build what
-we have read.
+local disk.
 
 - Upstream: <https://github.com/techknowlogick/certmagic-s3>
-- Forked at: `4d17998f812b1afcfe8613247cb70e0b849da04c` (2026-05-24)
+- Forked at: `6c26852bb192f1f0ccfe36b0508b3b9f12116632` (tag `v1.5.0`, 2026-10-02)
 - Licence: Apache 2.0 (see `LICENSE`)
 
-The module path is left as `github.com/techknowlogick/certmagic-s3`; the build
-substitutes this directory with an xcaddy `--with …=<dir>` replacement, so
+The build keeps the module path as `github.com/techknowlogick/certmagic-s3`.
+An xcaddy `--with …=<dir>` replacement substitutes this directory for it, so
 rebasing on upstream stays a plain diff.
 
-## Why not a released version
+## Why vendored
 
-`v1.4.0`, the latest tag, carries two serious bugs that are fixed on `master`
-but unreleased:
+We build the code we read: the module is compiled from this directory, not
+fetched by tag at build time. The vendored copy also carries a small set of
+local fixes that upstream does not have yet. The "Local changes" section
+lists them.
 
-- **[#21](https://github.com/techknowlogick/certmagic-s3/issues/21) — OCSP
-  cleanup deletes the entire bucket.** `List()` ignored its prefix argument, so
-  certmagic's `List(ctx, "ocsp", false)` got back *every* object in the bucket,
-  decided they were not valid staples, and deleted them. With a prefix
-  configured the mirror-image bug applied the prefix twice and nothing was ever
-  deleted. Fixed by [#20](https://github.com/techknowlogick/certmagic-s3/pull/20),
-  which is in the commit above.
-- **[#19](https://github.com/techknowlogick/certmagic-s3/issues/19) — the
-  Caddyfile block does not parse.** Also fixed on master.
+## Now upstream (v1.5.0)
 
-[#16](https://github.com/techknowlogick/certmagic-s3/issues/16) and
-[#18](https://github.com/techknowlogick/certmagic-s3/issues/18) are downstream
-reports of the same OCSP cleanup fault.
+The previous fork carried six local fixes to locking, all now part of
+upstream's own `lock.go`:
+
+- `Lock` backs off by `LockPollInterval` between retries, instead of spinning
+  on a storage error.
+- `Lock` honours context cancellation and stops as soon as the caller's
+  context ends.
+- Acquisition is atomic: the lock object is created with `If-None-Match: *`,
+  so the store, not this process, decides which of two racing instances wins.
+- The holder heartbeats its lock every `LockRefreshInterval` while it holds
+  it, so a slow certificate order no longer loses its lock during the wait.
+- `LockTimeout` now bounds only an unbroken run of storage failures, not the
+  whole wait for a live lock.
+- Releasing checks the lock is still this instance's own, by ETag, before
+  deleting it.
+
+Upstream also went further than the fork. It judges a lock stale by
+comparing its `LastModified` against the storage service's own `Date`
+header. Holders and waiters therefore never need to agree on wall-clock
+time. The fork parsed a timestamp out of the lock body instead.
+
+`LockExpiration` is now 2 minutes, up from the fork's 15 seconds. A live
+holder keeps its lock for as long as it needs, because it heartbeats
+regardless of this value. The longer expiration only slows down taking over
+a lock that is genuinely abandoned.
+
+A reload pays for this: `Cleanup()` leaves the lock object in place, so the
+incoming instance waits up to two minutes to reclaim it.
+
+### What this needs from the store
+
+The lock needs a store that honours `If-None-Match` and `If-Match` on
+writes. A store that ignores these headers accepts both writes. The lock
+then protects nothing, exactly as before this fix.
+
+RustFS answers `412 PreconditionFailed` and leaves the object untouched.
+[Scaleway documents both headers](https://www.scaleway.com/en/docs/object-storage/api-cli/using-conditional-writes/).
+AWS also answers `409` for a competing conditional write in flight; `lock.go`
+treats that the same way as a `412`.
 
 ## Local changes
 
 Every one is marked `LOCAL CHANGE` in the source.
 
-1. **`Lock()` no longer spins.** On any error from `GetObject` that was not a
-   404 — a network blip, a 403, throttling — upstream `continue`d with neither
-   a sleep nor a deadline check, turning an S3 problem into an unbounded loop
-   hammering S3 at full speed. The retry now backs off by `LockPollInterval`
-   and the acquisition deadline is checked at the top of every iteration.
+1. **`Cleanup()` stops the refreshers.** Caddy calls `Cleanup` when the
+   module goes away. On a config reload, this happens while the replacement
+   instance already runs. Without `Cleanup`, the outgoing instance keeps
+   heartbeating locks it will never release, and those locks never expire.
 
-2. **`Lock()` honours context cancellation.** Upstream could only be
-   interrupted by its own timeout, so shutting down mid-lock meant waiting it
-   out.
+2. **`Stat()` and `Load()` recognise every type of "not found".** Upstream
+   matches only `*types.NoSuchKey`. `GetObject` returns that type, but
+   `HeadObject` does not: it answers a bare 404, and the SDK surfaces that
+   as `*types.NotFound`. Without a match for `*types.NotFound`, `Stat()` on
+   a missing key returned a generic error, not `fs.ErrNotExist`. certmagic
+   reads `fs.ErrNotExist` to decide whether it must issue a certificate.
+   Both functions now call `isNotFound()`. This function, already defined in
+   upstream's `lock.go`, covers `*types.NoSuchKey`, `*types.NotFound`, and
+   any response that carries HTTP 404.
 
-3. **Acquisition is atomic.** Upstream read the lock file and then wrote it as
-   two separate operations, so two instances could both find no lock and both
-   create one — and then both order a certificate for the same name, against
-   Let's Encrypt's five-per-week duplicate limit. The creating write now
-   carries `If-None-Match: *`, so it is the bucket that decides who wins.
+3. **Credentials stay out of the logs.** certmagic logs the storage value at
+   INFO on every storage-cleaning pass, as `zap.Any("storage", storage)`.
+   Without `MarshalLogObject`, zap reflects over the struct's JSON tags
+   instead. It then writes the access key, the secret key, and the
+   encryption key in clear text. `MarshalLogObject` covers that path.
+   `String()` covers `%v` and `%s`. Neither format can print a credential.
 
-   This makes conditional writes a **requirement of the storage backend**. A
-   store that ignored the header would accept both writes and silently be as
-   racy as before. Verified on the two that matter here: RustFS answers `412
-   PreconditionFailed` and leaves the object untouched, and
-   [Scaleway documents both `If-None-Match` and `If-Match`](https://www.scaleway.com/en/docs/object-storage/api-cli/using-conditional-writes/).
-   AWS additionally answers `409` when a competing conditional write is in
-   flight, which is treated the same way.
+4. **`host` is validated.** `Provision` puts `https://` in front of `host`.
+   A value that already carried a scheme silently became
+   `https://https://…` and failed much later, as an endpoint nothing could
+   resolve. `validateHost` now refuses a scheme, a path, or a non-numeric
+   port at config-parse time, and its message says what to do instead.
+   `validateHost` also accepts an IP literal, including a bracketed or bare
+   IPv6 address, because `net.ParseIP` recognises it before the colon check
+   runs.
 
-4. **The holder heartbeats its lock.** Upstream declared `LockExpiration = 2m`,
-   never read it, and expired locks after `LockTimeout` (15s) instead. Nothing
-   refreshed the lock while ACME issuance ran, so a slow order had its lock
-   stolen mid-flight. A goroutine now rewrites the lock file every
-   `LockRefreshInterval` (5s, matching certmagic's own `FileStorage`), which is
-   what makes a short `LockExpiration` (15s) safe: a live holder keeps its lock
-   for as long as it needs, and a dead one is reclaimed seconds after it stops
-   rather than blocking every other instance for two minutes.
+### Local-only files
 
-   Every refresh is conditional on the ETag of the previous one, so once a lock
-   has been taken over the previous holder physically cannot write to it again.
+- `VENDORED.md` — this file.
+- `local_test.go` — tests for behaviour upstream does not have:
+  `TestValidateHost`, `TestStringHidesCredentials`,
+  `TestCleanupStopsRefreshing`, and `TestStatAndLoadReportNotExist`.
+- `log_test.go` — tests the log-redaction change (`MarshalLogObject`), which
+  upstream does not have.
 
-5. **`LockTimeout` bounds a broken bucket, not a busy one.** Upstream applied
-   it to the whole acquisition, so an instance gave up 15s into another's
-   perfectly healthy issuance and certmagic failed the handshake. Waiting on a
-   live lock is now bounded by `LockExpiration` instead — either the holder
-   finishes, or it stops refreshing and we take over — while `LockTimeout`
-   applies only to an unbroken run of failures from the bucket itself.
+### Omitted upstream files
 
-6. **Releasing checks the lock is still ours.** S3 has no conditional delete,
-   so `Unlock` stops the refresher, then compares the stored ETag with the one
-   it wrote before deleting. Losing that race merely leaves a lock file to
-   expire on its own; deleting one that another instance now holds would hand
-   its certificate order to a third.
-
-7. **`Cleanup()` stops the refreshers.** Caddy calls it when the module goes
-   away, which on a config reload happens while the replacement is already
-   running. Without it the outgoing instance would keep heartbeating locks it
-   has no intention of releasing, and they would never expire.
-
-8. **`Stat()` and `Load()` recognise every flavour of "not found".** Upstream
-   only matched `*types.NoSuchKey`, which `GetObject` returns but `HeadObject`
-   does not — `HeadObject` answers a bare 404 that the SDK surfaces as
-   `*types.NotFound`. `Stat()` on a missing key therefore returned a generic
-   error rather than `fs.ErrNotExist`, the sentinel certmagic keys its "must I
-   issue a certificate?" decision on. `isNotFound()` now also covers
-   `*types.NotFound` and any response carrying HTTP 404.
-
-9. **Credentials stay out of the logs.** certmagic logs the storage value at
-   INFO on every storage-cleaning pass, as `zap.Any("storage", storage)`. With
-   nothing to tell zap otherwise it reflected over the struct's JSON tags and
-   wrote the access key, the secret key and the encryption key out in clear
-   text. `MarshalLogObject` covers that path and `String()` covers `%v`/`%s`,
-   so neither spelling can print a credential.
-
-10. **`host` is validated.** It is a bare hostname that gets `https://` put in
-    front of it, so a value carrying a scheme silently became
-    `https://https://…` and surfaced much later as an unresolvable endpoint.
-    A scheme, a path or a non-numeric port is now refused at config-parse time,
-    where the message can say what to do instead.
+`Dockerfile`, `Makefile`, `README.md`, `.golangci.yml`, `.dockerignore`. The
+vendored copy builds through `caddy/Dockerfile` and documents itself through
+this file. The vendored copy is also gofmt-clean, which drops a stray
+semicolon that upstream still carries in `UnmarshalCaddyfile`.
 
 ## Deliberately left alone
 
-- **`UnmarshalCaddyfile`'s `if !d.Args(&value) { continue }`** looks like it is
-  swallowing malformed input, and it is — but it is also what skips the `s3`
-  module-name token from `storage s3 {`. Turning it into an error reproduces
-  issue #19 exactly. It now carries a comment saying so.
-- **`List()` ignores its `recursive` argument** and always lists everything
-  under the prefix. Correct for how certmagic calls it; noted here because it
-  is not what the signature promises.
+- **`UnmarshalCaddyfile`'s `if !d.Args(&value) { continue }`** silently
+  skips malformed input. It also skips the `s3` module-name token from
+  `storage s3 {`, which has no argument of its own. Turning the skip into an
+  error reproduces upstream issue #19. The code carries a comment that
+  explains this.
+- **`List()` ignores its `recursive` argument.** It always lists everything
+  under the prefix. This matches how certmagic calls `List()`. This note
+  exists because the behaviour does not match what the signature promises.
 
 ## Updating
 
