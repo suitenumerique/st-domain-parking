@@ -1,7 +1,6 @@
 package s3
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -16,12 +15,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -54,41 +51,8 @@ type S3 struct {
 
 	iowrap IO
 
-	// Locks held by this instance, by key, each with the goroutine that keeps
-	// it fresh. LOCAL CHANGE: upstream holds no state between Lock and Unlock.
 	locksMu sync.Mutex
-	locks   map[string]*lockHandle
-}
-
-// lockHandle is one held lock: the refresher's off switch, and the ETag of the
-// lock file as this instance last wrote it. The ETag is what makes every later
-// write conditional, so an instance can never overwrite a lock it no longer
-// owns.
-type lockHandle struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-
-	mu   sync.Mutex
-	etag string
-}
-
-func (h *lockHandle) currentETag() string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.etag
-}
-
-func (h *lockHandle) setETag(etag string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.etag = etag
-}
-
-// stop cancels the refresher and waits for it to exit, so that by the time
-// Unlock deletes the file no further writes can be in flight.
-func (h *lockHandle) stop() {
-	h.cancel()
-	<-h.done
+	locks   map[string]*heldLock
 }
 
 func init() {
@@ -198,366 +162,6 @@ func (s3 *S3) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-var (
-	// LockExpiration is how long a lock file may go unrefreshed before another
-	// instance treats it as abandoned.
-	//
-	// LOCAL CHANGE: upstream declares this, never reads it, and instead ages
-	// locks out after LockTimeout (15s). Nothing refreshed the lock while ACME
-	// issuance ran, so a slow issuance had its lock stolen out from under it —
-	// exactly what the lock exists to prevent. The holder now heartbeats (see
-	// refreshLock), which is what makes a short expiration safe: a live holder
-	// keeps its lock for as long as it needs, and a dead one is reclaimed
-	// seconds after it stops, instead of blocking everyone for two minutes.
-	LockExpiration = 15 * time.Second
-	// LockRefreshInterval is how often a holder rewrites its lock file, at a
-	// third of the expiration so two refreshes can fail before it looks dead.
-	// Matches the cadence of certmagic's own FileStorage.
-	LockRefreshInterval = 5 * time.Second
-	LockPollInterval    = 1 * time.Second
-	// LockTimeout bounds how long we keep retrying when the *bucket* is
-	// misbehaving — unreachable, throttling, refusing us.
-	//
-	// LOCAL CHANGE: upstream applies this to the whole acquisition, so an
-	// instance gave up 15s into someone else's perfectly healthy issuance and
-	// certmagic failed the handshake. Waiting on a live lock is now bounded by
-	// LockExpiration instead: either the holder finishes, or it stops
-	// refreshing and we take the lock over.
-	LockTimeout = 15 * time.Second
-)
-
-func (s3 *S3) Lock(ctx context.Context, key string) error {
-	name := s3.objLockName(key)
-	s3.Logger.Debug("acquiring lock", zap.String("key", name))
-
-	// When the bucket first started failing. Reset on every answer we can
-	// interpret, so only an unbroken run of failures counts against
-	// LockTimeout.
-	var failingSince time.Time
-
-	for {
-		// LOCAL CHANGE: honour context cancellation. Upstream can only be
-		// interrupted by its own timeout, so a shutdown mid-lock waits it out.
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		// Timed from before the call, not after it: a bucket that hangs until
-		// the SDK gives up burns the whole budget inside a single attempt, and
-		// timing from the return would restart the clock every time.
-		attemptedAt := time.Now()
-
-		// LOCAL CHANGE: the heart of it. Upstream read the lock and then wrote
-		// it as two separate calls, so two instances could both see no lock
-		// and both create one. A conditional create is refused by the bucket
-		// unless the object really does not exist yet, which is the only way
-		// to make acquisition atomic.
-
-		etag, err := s3.writeLockFile(ctx, key, "")
-		switch {
-		case err == nil:
-			s3.hold(key, etag)
-			return nil
-		case isPreconditionFailed(err):
-			// Someone holds it. Fall through and see whether they are alive.
-			failingSince = time.Time{}
-		default:
-			if failingSince.IsZero() {
-				failingSince = attemptedAt
-			}
-			if time.Since(failingSince) > LockTimeout {
-				return fmt.Errorf("acquiring lock %s: %w", name, err)
-			}
-			// LOCAL CHANGE: upstream `continue`s here with neither a sleep nor
-			// a deadline check, so any non-404 error — a network blip, a 403,
-			// throttling — becomes an unbounded tight loop hammering S3.
-			s3.Logger.Warn("lock write failed, retrying",
-				zap.String("key", name), zap.Error(err))
-			if err := sleep(ctx, LockPollInterval); err != nil {
-				return err
-			}
-			continue
-		}
-
-		attemptedAt = time.Now()
-
-		written, holderETag, err := s3.readLockFile(ctx, key)
-		if err != nil {
-			if isNotFound(err) {
-				// Released between our write and our read. Go straight back
-				// and try to claim it.
-				continue
-			}
-			if failingSince.IsZero() {
-				failingSince = attemptedAt
-			}
-			if time.Since(failingSince) > LockTimeout {
-				return fmt.Errorf("reading lock %s: %w", name, err)
-			}
-			s3.Logger.Warn("lock read failed, retrying",
-				zap.String("key", name), zap.Error(err))
-			if err := sleep(ctx, LockPollInterval); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// A lock file we cannot parse has a zero timestamp, so it reads as
-		// long expired and is taken over below — upstream's behaviour, minus
-		// the blind overwrite.
-		if time.Since(written) > LockExpiration {
-			// Conditional on the ETag we just read: if the holder refreshed it
-			// in the meantime, or another waiter got there first, the write is
-			// refused and we go round again rather than trampling a live lock.
-			etag, err := s3.writeLockFile(ctx, key, holderETag)
-			if err == nil {
-				s3.Logger.Info("took over an abandoned lock",
-					zap.String("key", name),
-					zap.Duration("stale_for", time.Since(written)),
-				)
-				s3.hold(key, etag)
-				return nil
-			}
-			if !isPreconditionFailed(err) {
-				s3.Logger.Warn("taking over lock failed, retrying",
-					zap.String("key", name), zap.Error(err))
-			}
-		}
-
-		if err := sleep(ctx, LockPollInterval); err != nil {
-			return err
-		}
-	}
-}
-
-// hold records a newly acquired lock and starts the goroutine that keeps it
-// fresh for as long as this instance holds it.
-func (s3 *S3) hold(key, etag string) {
-	ctx, cancel := context.WithCancel(context.Background())
-	handle := &lockHandle{cancel: cancel, done: make(chan struct{}), etag: etag}
-
-	s3.locksMu.Lock()
-	if s3.locks == nil {
-		s3.locks = make(map[string]*lockHandle)
-	}
-	previous := s3.locks[key]
-	s3.locks[key] = handle
-	s3.locksMu.Unlock()
-
-	// certmagic serialises its own Lock/Unlock per key, so this is a
-	// belt-and-braces guard against leaking a refresher.
-	if previous != nil {
-		previous.stop()
-	}
-
-	go s3.refreshLock(ctx, key, handle)
-}
-
-// refreshLock rewrites the lock file until the lock is released. Every write is
-// conditional on the ETag of the previous one, so once the lock has been taken
-// over this instance can no longer write to it.
-func (s3 *S3) refreshLock(ctx context.Context, key string, handle *lockHandle) {
-	defer close(handle.done)
-
-	ticker := time.NewTicker(LockRefreshInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		etag, err := s3.writeLockFile(ctx, key, handle.currentETag())
-		switch {
-		case err == nil:
-			handle.setETag(etag)
-		case errors.Is(err, context.Canceled):
-			return
-		case isPreconditionFailed(err):
-			// Taken over while we still believed we held it. Writing again
-			// would stamp our timestamp onto someone else's lock and keep it
-			// alive on their behalf, so stop refreshing.
-			s3.Logger.Warn("lock was taken over by another instance",
-				zap.String("key", s3.objLockName(key)))
-			return
-		default:
-			// Transient: LockExpiration leaves room for two of these before
-			// anyone considers the lock abandoned.
-			s3.Logger.Warn("refreshing lock failed",
-				zap.String("key", s3.objLockName(key)), zap.Error(err))
-		}
-	}
-}
-
-// sleep waits, unless the context ends first.
-func sleep(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-// isNotFound reports whether err means "this object does not exist".
-//
-// LOCAL CHANGE: upstream only checks for *types.NoSuchKey, which GetObject
-// returns but HeadObject does not — Head answers a bare 404 that the SDK
-// surfaces as *types.NotFound. Without this, Stat on a missing key returned a
-// generic error instead of fs.ErrNotExist, which is the sentinel certmagic
-// keys its "do I need to issue a certificate?" logic on.
-func isNotFound(err error) bool {
-	var noSuchKey *types.NoSuchKey
-	if errors.As(err, &noSuchKey) {
-		return true
-	}
-
-	var notFound *types.NotFound
-	if errors.As(err, &notFound) {
-		return true
-	}
-
-	var responseError *awshttp.ResponseError
-	return errors.As(err, &responseError) &&
-		responseError.HTTPStatusCode() == http.StatusNotFound
-}
-
-// isPreconditionFailed reports whether err is the bucket refusing a conditional
-// write. 412 is the documented answer; AWS also answers 409 when a competing
-// conditional write is still in flight, which means the same thing to us:
-// somebody else has it.
-func isPreconditionFailed(err error) bool {
-	var responseError *awshttp.ResponseError
-	if !errors.As(err, &responseError) {
-		return false
-	}
-
-	status := responseError.HTTPStatusCode()
-	return status == http.StatusPreconditionFailed || status == http.StatusConflict
-}
-
-// writeLockFile stamps the lock file with the current time and returns its new
-// ETag. An empty ifMatch writes only if the object does not exist yet;
-// otherwise the write lands only if the object is still exactly the one that
-// ETag came from. Either way it is the bucket, not this process, that decides
-// who wins — which is the whole point.
-//
-// LOCAL CHANGE: upstream writes unconditionally.
-func (s3 *S3) writeLockFile(ctx context.Context, key, ifMatch string) (string, error) {
-	// Nanoseconds, where upstream wrote whole seconds: the expiration is now
-	// counted in seconds, so rounding to one is a large error. time.Parse with
-	// the RFC3339 layout still reads both, including lock files left behind by
-	// an older build.
-	body := []byte(time.Now().Format(time.RFC3339Nano))
-
-	input := &s3sdk.PutObjectInput{
-		Bucket:        aws.String(s3.Bucket),
-		Key:           aws.String(s3.objLockName(key)),
-		Body:          bytes.NewReader(body),
-		ContentLength: aws.Int64(int64(len(body))),
-	}
-	if ifMatch == "" {
-		input.IfNoneMatch = aws.String("*")
-	} else {
-		input.IfMatch = aws.String(ifMatch)
-	}
-
-	output, err := s3.Client.PutObject(ctx, input)
-	if err != nil {
-		return "", err
-	}
-
-	if etag := aws.ToString(output.ETag); etag != "" {
-		return etag, nil
-	}
-
-	// Every S3 implementation is supposed to return the ETag on a write. One
-	// that does not would leave us unable to make the next write conditional,
-	// so pay for a HEAD rather than silently dropping back to blind writes.
-	head, err := s3.Client.HeadObject(ctx, &s3sdk.HeadObjectInput{
-		Bucket: aws.String(s3.Bucket),
-		Key:    aws.String(s3.objLockName(key)),
-	})
-	if err != nil {
-		return "", fmt.Errorf("lock written but its ETag is unknown: %w", err)
-	}
-
-	return aws.ToString(head.ETag), nil
-}
-
-// readLockFile returns when the lock was last written and the ETag it carries.
-func (s3 *S3) readLockFile(ctx context.Context, key string) (time.Time, string, error) {
-	output, err := s3.Client.GetObject(ctx, &s3sdk.GetObjectInput{
-		Bucket: aws.String(s3.Bucket),
-		Key:    aws.String(s3.objLockName(key)),
-	})
-	if err != nil {
-		return time.Time{}, "", err
-	}
-	defer func() { _ = output.Body.Close() }()
-
-	body, err := io.ReadAll(output.Body)
-	if err != nil {
-		return time.Time{}, "", err
-	}
-
-	etag := aws.ToString(output.ETag)
-
-	written, err := time.Parse(time.RFC3339, string(body))
-	if err != nil {
-		// Not a timestamp at all. The zero time reads as long expired, so the
-		// caller takes it over — but still conditionally, on the ETag.
-		return time.Time{}, etag, nil
-	}
-
-	return written, etag, nil
-}
-
-func (s3 *S3) Unlock(ctx context.Context, key string) error {
-	name := s3.objLockName(key)
-	s3.Logger.Debug("releasing lock", zap.String("key", name))
-
-	s3.locksMu.Lock()
-	handle := s3.locks[key]
-	delete(s3.locks, key)
-	s3.locksMu.Unlock()
-
-	if handle != nil {
-		// Stop the refresher first and wait for it, so no write can land after
-		// the delete below and resurrect a lock nobody holds.
-		handle.stop()
-
-		// LOCAL CHANGE: S3 has no conditional delete, so an ETag check is the
-		// closest thing available to "delete only if it is still mine". It is
-		// not atomic; losing the race merely leaves a lock file to expire on
-		// its own, whereas deleting one that another instance now holds would
-		// hand its certificate order to a third.
-		head, err := s3.Client.HeadObject(ctx, &s3sdk.HeadObjectInput{
-			Bucket: aws.String(s3.Bucket),
-			Key:    aws.String(name),
-		})
-		switch {
-		case isNotFound(err):
-			return nil
-		case err == nil && aws.ToString(head.ETag) != handle.currentETag():
-			s3.Logger.Warn("not releasing a lock that is no longer ours",
-				zap.String("key", name))
-			return nil
-		}
-	}
-
-	_, err := s3.Client.DeleteObject(ctx, &s3sdk.DeleteObjectInput{
-		Bucket: aws.String(s3.Bucket),
-		Key:    aws.String(name),
-	})
-	return err
-}
-
 func (s3 *S3) Store(ctx context.Context, key string, value []byte) error {
 	start := time.Now()
 	objName := s3.objName(key)
@@ -618,6 +222,11 @@ func (s3 *S3) Load(ctx context.Context, key string) ([]byte, error) {
 
 	result, err := s3.Client.GetObject(ctx, input)
 	if err != nil {
+		// LOCAL CHANGE: upstream matches only *types.NoSuchKey, which
+		// GetObject returns but HeadObject does not. isNotFound (lock.go)
+		// also covers *types.NotFound and a bare HTTP 404, so Load and Stat
+		// agree on fs.ErrNotExist, the sentinel certmagic keys its
+		// "must I issue a certificate?" decision on.
 		if isNotFound(err) {
 			return nil, fs.ErrNotExist
 		}
@@ -724,6 +333,10 @@ func (s3 *S3) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error) {
 
 	result, err := s3.Client.HeadObject(ctx, input)
 	if err != nil {
+		// LOCAL CHANGE: upstream matches only *types.NoSuchKey, which
+		// HeadObject never returns — it answers a bare 404, surfaced by the
+		// SDK as *types.NotFound. Without isNotFound (lock.go), Stat on a
+		// missing key returned a generic error instead of fs.ErrNotExist.
 		if isNotFound(err) {
 			return ki, fs.ErrNotExist
 		}
@@ -756,21 +369,39 @@ func (s3 *S3) CertMagicStorage() (certmagic.Storage, error) {
 	return s3, nil
 }
 
-// MarshalLogObject implements zapcore.ObjectMarshaler, and deliberately emits
-// nothing at all.
+// String keeps the credentials out of anything that formats this value.
+//
+// LOCAL CHANGE: MarshalLogObject below covers zap.Any, which is how
+// certmagic logs the storage. This covers fmt's %v and %s, which would
+// otherwise print every field of the struct, including the keys.
+func (s3 *S3) String() string {
+	return fmt.Sprintf("S3 storage: bucket=%s endpoint=%s prefix=%s",
+		s3.Bucket, s3.Endpoint, s3.Prefix)
+}
+
+// MarshalLogObject implements zapcore.ObjectMarshaler, and deliberately
+// emits nothing at all.
 //
 // LOCAL CHANGE: certmagic logs the whole storage value at INFO on every
 // storage-cleaning pass ("cleaning storage unit"). Without this method zap
-// falls back to reflection over the struct's JSON tags and writes secret_key
-// and encryption_key out in clear text, putting the bucket credentials into
-// every log aggregator the operator ships to.
+// falls back to reflection over the struct's JSON tags and writes
+// secret_key and encryption_key out in clear text, putting the bucket
+// credentials into every log aggregator the operator ships to.
 //
-// Nothing here is worth logging on a repeating INFO line — the bucket and
-// endpoint are already visible in the config — and an empty object cannot
+// Nothing here is worth logging on a repeating INFO line: the bucket and
+// endpoint are already visible in the config, and an empty object cannot
 // leak a field somebody adds to the struct later.
+func (s3 *S3) MarshalLogObject(zapcore.ObjectEncoder) error {
+	return nil
+}
+
 // validateHost reports whether host is a bare hostname, optionally with a
-// numeric port. Anything else — a scheme, a path, a stray slash — would be
+// numeric port. Anything else, such as a scheme or a path, would be
 // concatenated into a nonsense endpoint that fails only at connect time.
+//
+// LOCAL CHANGE: host gets `https://` put in front of it below. Without this
+// check, a value that already carried a scheme silently became
+// `https://https://…` and surfaced much later as an unresolvable endpoint.
 func validateHost(host string) error {
 	if host == "" {
 		return errors.New("host must not be empty")
@@ -781,8 +412,8 @@ func validateHost(host string) error {
 
 	hostname := host
 	if split, port, err := net.SplitHostPort(host); err == nil {
-		// Not just any trailing colon: `https:example.com` splits cleanly here
-		// too, and is no more a hostname than the form above.
+		// Not just any trailing colon: `https:example.com` splits cleanly
+		// here too, and is no more a hostname than the form above.
 		if _, err := strconv.Atoi(port); err != nil {
 			return fmt.Errorf("host %q has a non-numeric port %q", host, port)
 		}
@@ -792,24 +423,12 @@ func validateHost(host string) error {
 	if hostname == "" {
 		return fmt.Errorf("host %q has no hostname", host)
 	}
-	if strings.ContainsAny(hostname, "/:") {
+	// An IPv6 literal such as "::1" contains colons that are not a scheme
+	// or a path, so the check below must not see it as one.
+	if net.ParseIP(hostname) == nil && strings.ContainsAny(hostname, "/:") {
 		return fmt.Errorf("host %q must be a bare hostname", host)
 	}
 
-	return nil
-}
-
-// String keeps the credentials out of anything that formats this value.
-//
-// LOCAL CHANGE: MarshalLogObject below covers zap.Any, which is how certmagic
-// logs the storage. This covers fmt's %v and %s, which would otherwise print
-// every field of the struct — including the keys.
-func (s3 *S3) String() string {
-	return fmt.Sprintf("S3 storage: bucket=%s endpoint=%s prefix=%s",
-		s3.Bucket, s3.Endpoint, s3.Prefix)
-}
-
-func (s3 *S3) MarshalLogObject(zapcore.ObjectEncoder) error {
 	return nil
 }
 
@@ -823,10 +442,10 @@ func (s3 *S3) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		var value string
 
 		// Load-bearing, do not turn this into an error: the first token the
-		// dispenser yields is the module name `s3` from `storage s3 {`, which
-		// has no argument of its own. Erroring here breaks the whole block
-		// with "wrong argument count or unexpected line ending after 's3'" —
-		// upstream issue #19, which is what v1.4.0 shipped.
+		// dispenser yields is the module name `s3` from `storage s3 {`,
+		// which has no argument of its own. Erroring here breaks the whole
+		// block with "wrong argument count or unexpected line ending after
+		// 's3'" — upstream issue #19, which is what v1.4.0 shipped.
 		if !d.Args(&value) {
 			continue
 		}
@@ -887,10 +506,8 @@ func (s3 *S3) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		return d.Err("cannot specify both 'host' and 'endpoint' options")
 	}
 	if s3.Host != "" && s3.Endpoint == "" {
-		// LOCAL CHANGE: `host` is a bare
-		// hostname that gets https:// put in front of it. Without this, a URL
-		// here silently became `https://https://…` and surfaced much later as
-		// an unresolvable endpoint.
+		// LOCAL CHANGE: validate the bare hostname before building the
+		// endpoint from it; see validateHost above for why.
 		if err := validateHost(s3.Host); err != nil {
 			return d.Errf("%v", err)
 		}
@@ -905,21 +522,31 @@ func (s3 *S3) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 
 // Cleanup stops every refresher this instance is running.
 //
-// LOCAL CHANGE: Caddy calls this when the module goes away, which on a config
-// reload happens while the replacement is already running. Without it the
-// outgoing instance would keep heartbeating locks that it no longer has any
-// intention of releasing, and the locks would never expire.
+// LOCAL CHANGE: Caddy calls this when the module goes away, which on a
+// config reload happens while the replacement is already running. Without
+// it the outgoing instance would keep heartbeating locks that it no longer
+// has any intention of releasing, and the locks would never expire.
 func (s3 *S3) Cleanup() error {
 	s3.locksMu.Lock()
-	handles := make([]*lockHandle, 0, len(s3.locks))
-	for key, handle := range s3.locks {
-		handles = append(handles, handle)
-		delete(s3.locks, key)
+	handles := make([]*heldLock, 0, len(s3.locks))
+	for name, h := range s3.locks {
+		handles = append(handles, h)
+		delete(s3.locks, name)
 	}
 	s3.locksMu.Unlock()
 
-	for _, handle := range handles {
-		handle.stop()
+	// Same stop sequence as Unlock: a handle leaves s3.locks before its stop
+	// channel closes, so no handle is closed twice. A Lock call that
+	// completes after this returns starts a refresher nothing stops; Caddy
+	// cancels the module's jobs before it calls Cleanup, so none is in flight.
+	//
+	// Close every stop before waiting on any done: a refresher can sit in
+	// putLock for up to LockRefreshInterval, and Caddy blocks the reload here.
+	for _, h := range handles {
+		close(h.stop)
+	}
+	for _, h := range handles {
+		<-h.done
 	}
 
 	return nil

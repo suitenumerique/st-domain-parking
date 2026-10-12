@@ -4,13 +4,18 @@
 # under /opt/python, dependencies in /venv, and a distroless production
 # runtime with pip/tests/headers stripped out.
 
-ARG PYTHON_VERSION=3.13
-ARG UV_VERSION=0.12.3
+ARG PYTHON_VERSION=3.14.8
+ARG UV_VERSION=0.13.0
 
-FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv-bin
+# Digests resolved on 2026-10-12.
+ARG UV_DIGEST=sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168
+ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+ARG DISTROLESS_CC_IMAGE=gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
+
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}@${UV_DIGEST} AS uv-bin
 
 # ---- uv + managed Python ----
-FROM debian:trixie-slim AS uv
+FROM ${DEBIAN_IMAGE} AS uv
 ARG PYTHON_VERSION
 
 COPY --from=uv-bin /uv /usr/local/bin/uv
@@ -52,8 +57,10 @@ ARG PYTHON_VERSION
 
 RUN <<EOR
 set -eu
-root=$(find /opt/python -maxdepth 1 -mindepth 1 -type d)
-lib="${root}/lib/python${PYTHON_VERSION}"
+root=$(find /opt/python -maxdepth 1 -mindepth 1 -type d -name 'cpython-*')
+lib="${root}/lib/python$(printf '%s' "${PYTHON_VERSION}" | cut -d. -f1,2)"
+# Fail the build here: rm -rf below would pass silently on a wrong path.
+[ -d "${lib}" ]
 rm -rf \
     "${lib}/test" \
     "${lib}/idlelib" \
@@ -70,11 +77,11 @@ EOR
 
 # ---- Writable output directory, pre-owned ----
 # distroless has no shell, so ownership has to be baked in here.
-FROM debian:trixie-slim AS state
+FROM ${DEBIAN_IMAGE} AS state
 RUN mkdir -p /state/sites && chown -R 65532:65532 /state
 
 # ---- Production application source ----
-FROM debian:trixie-slim AS app-prod
+FROM ${DEBIAN_IMAGE} AS app-prod
 COPY builder/ /app/builder/
 RUN <<EOR
 rm -rf /app/builder/tests
@@ -87,7 +94,7 @@ EOR
 # ---- Development runtime ----
 # Debian-based, with a shell and the dev extras. Handy for debugging; not what
 # runs in production.
-FROM debian:trixie-slim AS runtime-dev
+FROM ${DEBIAN_IMAGE} AS runtime-dev
 
 COPY --from=python-stripped /opt/python /opt/python
 COPY --from=base-with-deps-dev /venv /venv
@@ -100,7 +107,7 @@ WORKDIR /app
 CMD ["python", "-m", "builder"]
 
 # ---- Builder runtime ----
-FROM gcr.io/distroless/cc-debian13:nonroot AS builder
+FROM ${DISTROLESS_CC_IMAGE} AS builder
 
 COPY --from=python-stripped /opt/python /opt/python
 COPY --from=base-with-deps /venv /venv

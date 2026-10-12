@@ -24,7 +24,7 @@ make install          # builds the tooling image every other target runs in
 ## Tier 1 — on every save (~15 s)
 
 ```sh
-make test             # 62 unit tests
+make test             # 66 unit tests
 make lint-check       # ruff format, ruff check, pylint, and the Caddyfile
 ```
 
@@ -57,9 +57,12 @@ Concurrency bugs hide from single runs. Before changing anything about
 locking, hammer it:
 
 ```sh
-docker run --rm -v "$PWD/caddy/certmagic-s3":/src -w /src golang:1.25 \
-  go test -race -count=50 -run TestOnlyOneInstanceAcquiresALock ./...
+docker run --rm -v "$PWD/caddy/certmagic-s3":/src -w /src \
+  golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c \
+  go test -race -count=50 -run TestLockIsExclusiveAcrossInstances ./...
 ```
+
+Keep this image the same as `GO_IMAGE` in the Makefile.
 
 ## Tier 3 — before deploying (~13 s warm)
 
@@ -87,8 +90,28 @@ docker compose down -v          # when you are done
 make install && make lint-check && make test && make vendor-test && make test-e2e
 ```
 
-Expect: `62 passed`, `10.00/10`, `Valid configuration`, `ok  …certmagic-s3`,
+Expect: `66 passed`, `10.00/10`, `Valid configuration`, `ok  …certmagic-s3`,
 `All end-to-end checks passed`.
+
+## Tier 4 — vulnerability scan (~1 min)
+
+Run [grype](https://github.com/anchore/grype) on the two images the stack
+builds. The gate fails on any finding that has a fix.
+
+```sh
+docker compose build builder caddy
+grype db update
+grype docker:st-domain-parking-builder:latest --only-fixed --fail-on low
+grype docker:st-domain-parking-caddy:latest --only-fixed --fail-on low
+```
+
+Expect: no finding, or only findings whose fix the project cannot take
+yet. Decide what to do with each one, and check its CVE record: grype can
+match a version range too widely.
+
+The Debian packages in the distroless base (`libc6`, `zlib1g`, `libstdc++6`)
+carry findings with no fix in Debian 13. `--only-fixed` leaves them out of
+the gate; the full report `grype docker:<image>` still lists them.
 
 ## Checks nothing automates
 

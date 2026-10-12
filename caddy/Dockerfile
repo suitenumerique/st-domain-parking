@@ -3,13 +3,17 @@
 #
 # Context is this directory — the Caddyfile plus certmagic-s3/, which is built
 # from local source rather than fetched by version. See certmagic-s3/VENDORED.md
-# for why (the latest release deletes the whole bucket during OCSP cleanup) and
-# for the local fixes on top.
+# for the local changes on top of upstream.
 
-ARG CADDY_VERSION=2.11.4
+ARG CADDY_VERSION=2.11.7
+
+# Digests resolved on 2026-10-12.
+ARG CADDY_BUILDER_DIGEST=sha256:5b98e8a4c3d077585c5980b205cfcc9602d820675d5e0cfdbf5eeff939dc0b4a
+ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+ARG DISTROLESS_STATIC_IMAGE=gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 
 # ---- Build Caddy with the storage plugin ----
-FROM caddy:${CADDY_VERSION}-builder AS build
+FROM caddy:${CADDY_VERSION}-builder@${CADDY_BUILDER_DIGEST} AS build
 
 WORKDIR /src
 COPY certmagic-s3/ ./certmagic-s3/
@@ -27,10 +31,10 @@ RUN /out/caddy list-modules | grep -qx 'caddy.storage.s3'
 
 # distroless has no shell, so writable directories have to be created and
 # owned here.
-FROM debian:trixie-slim AS state
+FROM ${DEBIAN_IMAGE} AS state
 RUN mkdir -p /state/data /state/config && chown -R 65532:65532 /state
 
-FROM gcr.io/distroless/static-debian13:nonroot
+FROM ${DISTROLESS_STATIC_IMAGE}
 
 COPY --from=build /out/caddy /usr/bin/caddy
 COPY Caddyfile /etc/caddy/Caddyfile

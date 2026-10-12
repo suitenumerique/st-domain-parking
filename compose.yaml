@@ -100,7 +100,7 @@ services:
 
   # S3-compatible store, for local development and the end-to-end test only.
   rustfs:
-    image: rustfs/rustfs:latest
+    image: rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
     restart: unless-stopped
     environment:
       RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
