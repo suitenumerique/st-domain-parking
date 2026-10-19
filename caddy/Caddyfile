@@ -49,6 +49,14 @@ http://127.0.0.1:{$ASK_PORT:9000} {
 	@parked file /{query.domain}/.parked
 	respond @parked 200
 
+	# Helpcenter hosts have no marker, but they still need a certificate.
+	# Caddy reads {env.*} at request time, so the value is data, never config
+	# text, and `in` is an exact match with no wildcard. Backticks keep the
+	# inner quotes and spaces inside one token. The target check stops
+	# issuance for a half-configured deployment.
+	@helpcenter expression `{query.domain} != "" && {env.HELPCENTER_REDIRECT_TARGET} != "" && {query.domain} in {env.HELPCENTER_REDIRECT_HOSTS}.split(" ")`
+	respond @helpcenter 200
+
 	respond 404
 }
 
@@ -59,7 +67,21 @@ http://127.0.0.1:{$ASK_PORT:9000} {
 # owner is expected to replace with a real site, and a 301 would sit in
 # browser caches long after that happened.
 http:// {
-	redir https://{host}{uri} 302
+	log {
+		output stdout
+		format json
+	}
+
+	route {
+		# Caddy answers the load-balancer probe here, before the redirect.
+		@heartbeat path /__lbheartbeat__ /__lbheartbeat__/
+		handle @heartbeat {
+			log_skip
+			respond 200
+		}
+
+		redir https://{host}{uri} 302
+	}
 }
 
 https:// {
@@ -70,7 +92,26 @@ https:// {
 		on_demand
 	}
 
+	log {
+		output stdout
+		format json
+	}
+
 	root * {$OUTPUT_DIR:/srv/sites}
+
+	@heartbeat path /__lbheartbeat__ /__lbheartbeat__/
+	handle @heartbeat {
+		log_skip
+		header -Server
+		respond 200
+	}
+
+	# Same checks as the ask endpoint above, on the Host header this time.
+	@helpcenter expression `{host} != "" && {env.HELPCENTER_REDIRECT_TARGET} != "" && {host} in {env.HELPCENTER_REDIRECT_HOSTS}.split(" ")`
+	handle @helpcenter {
+		header -Server
+		redir {env.HELPCENTER_REDIRECT_TARGET} 302
+	}
 
 	@parked file /{host}/.parked
 	handle @parked {

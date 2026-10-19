@@ -74,6 +74,13 @@ make test-e2e         # the whole stack against RustFS
 TLS allowlist, pre-compressed variants being served, certificates landing in
 S3, and that storage cleaning spares objects outside the prefix.
 
+It also checks the helpcenter redirect: two listed hosts get a certificate
+and redirect to the configured target, on the root path and on a sub-path.
+It checks that `/__lbheartbeat__` answers 200 on both listeners, with and
+without the trailing slash, and also on a helpcenter host.
+It checks the Caddy logs: they contain access lines, no heartbeat path, and
+no SDK debug line.
+
 It uses Caddy's internal CA (`CADDY_TLS_ISSUER=internal`), since no public DNS
 points at a laptop. Everything else is the real thing.
 

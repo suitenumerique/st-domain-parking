@@ -17,6 +17,9 @@ BUCKET=${S3_BUCKET:-caddy-certs}
 PARKED=www.brigny.fr
 APEX=brigny.fr
 UNKNOWN=not-parked.example
+HELPCENTER=help.example
+HELPCENTER_ALT=help-alt.example
+HELPCENTER_TARGET=https://helpcenter.example/parking
 
 failures=0
 
@@ -52,7 +55,10 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==> Starting the stack (RustFS standing in for S3)"
-CADDY_TLS_ISSUER=internal "${COMPOSE[@]}" up -d --build >/dev/null
+CADDY_TLS_ISSUER=internal \
+	HELPCENTER_REDIRECT_HOSTS="$HELPCENTER $HELPCENTER_ALT" \
+	HELPCENTER_REDIRECT_TARGET="$HELPCENTER_TARGET" \
+	"${COMPOSE[@]}" up -d --build >/dev/null
 
 echo "==> Waiting for the first build"
 # Matched in the shell rather than through `| grep -q`: grep closes the pipe on
@@ -85,6 +91,9 @@ check "favicon.ico answers no-content"   "204"  "$(probe "$PARKED" /favicon.ico)
 check "robots.txt is served"             "200"  "$(probe "$PARKED" /robots.txt)"
 check "apex redirects to www"            "https://$PARKED/" "$(probe "$APEX" / '%{redirect_url}')"
 check "apex sub-path redirects to www"   "https://$PARKED/" "$(probe "$APEX" /deep '%{redirect_url}')"
+check "heartbeat answers on http"        "200" "$(curl -s -o /dev/null -w '%{http_code}' "$HTTP/__lbheartbeat__")"
+check "heartbeat answers on https"       "200" "$(probe "$PARKED" /__lbheartbeat__)"
+check "heartbeat with slash answers too" "200" "$(probe "$PARKED" /__lbheartbeat__/)"
 
 echo
 echo "Content"
@@ -107,6 +116,28 @@ echo "TLS allowlist"
 # An unknown host has no .parked marker, so the ask endpoint refuses issuance
 # and the handshake fails outright — curl reports 000, never a page.
 check "unknown host is refused a certificate" "000" "$(probe "$UNKNOWN" /)"
+
+# Helpcenter hosts have no marker either, but the ask endpoint allows them
+# explicitly, so the handshake succeeds and every path redirects to the URL.
+check "helpcenter host gets a certificate"  "302" "$(probe "$HELPCENTER" /)"
+check "helpcenter redirects to the target"  "$HELPCENTER_TARGET" "$(probe "$HELPCENTER" / '%{redirect_url}')"
+check "helpcenter sub-path redirects too"   "$HELPCENTER_TARGET" "$(probe "$HELPCENTER" /deep/link '%{redirect_url}')"
+check "second helpcenter host works too"    "$HELPCENTER_TARGET" "$(probe "$HELPCENTER_ALT" / '%{redirect_url}')"
+check "heartbeat on a helpcenter host is not redirected" "200" "$(probe "$HELPCENTER" /__lbheartbeat__)"
+
+echo
+echo "Logs"
+# Matched in the shell rather than through `| grep -q`: grep closes the pipe
+# early and the SIGPIPE becomes the pipeline's status under pipefail.
+caddy_logs=$("${COMPOSE[@]}" logs caddy 2>&1 || true)
+[[ $caddy_logs == *'"logger":"http.log.access'* ]] &&
+	pass "access logs are emitted" || fail "access logs are emitted"
+[[ $caddy_logs == *'__lbheartbeat__'* ]] &&
+	fail "heartbeat stays out of the logs" || pass "heartbeat stays out of the logs"
+# One line at a time: a single glob over the whole log would also match
+# "SDK " and "DEBUG" on two unrelated lines.
+sdk_debug_lines=$(printf '%s\n' "$caddy_logs" | grep -c 'SDK .*DEBUG' || true)
+check "SDK debug lines stay out of the logs" "0" "$sdk_debug_lines"
 
 echo
 echo "Certificate storage in S3"
