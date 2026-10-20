@@ -43,7 +43,7 @@ restart, no config regeneration. Every redirect is temporary (302) on purpose â€
 parking is a placeholder that owners are expected to replace with a real site,
 and a 301 would linger in browser caches long after that.
 
-The page is ~5.8 kB of HTML, ~1.6 kB over the wire, in a single request: no
+The page is ~4.2 kB of HTML, ~1.6 kB over the wire, in a single request: no
 fonts, no stylesheets, no scripts, no images. The favicon is an inline data
 URI.
 
@@ -121,7 +121,18 @@ which means a redirect from the apex lands you on `https://www.brigny.fr/`
 on 8443.
 
 To skip the server altogether and just look at the HTML, `make build` writes
-the pages to `./build`, owned by you rather than by root.
+the pages to `./build`, owned by you rather than by root. `make preview` builds
+them and serves that directory over HTTP, so a template change can be looked
+at in a browser:
+
+```sh
+make preview
+# http://localhost:8081/www.brigny.fr/index.html
+```
+
+The tree is served as it is written, hence the host in the path. This is the
+page and nothing else: no TLS, no redirect, no allowlist. `make run` is the
+whole stack.
 
 ## Configuration
 
@@ -131,6 +142,7 @@ Builder:
 | --- | --- | --- |
 | `DOMAINS_URL` | *(required)* | Location of the JSON file: `https://`, `s3://`, `file://` or a path |
 | `REBUILD_INTERVAL` | `300` | Seconds between refetches. `0` builds once and exits |
+| `BUILD_JOBS` | *(auto)* | Worker processes for the build. Empty means one per usable CPU |
 | `OUTPUT_DIR` | `/srv/sites` | Root of the generated tree |
 | `LOG_LEVEL` | `INFO` | Python log level |
 

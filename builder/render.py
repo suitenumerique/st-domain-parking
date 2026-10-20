@@ -14,8 +14,11 @@ Caddy's file cache is not invalidated for no reason.
 
 import gzip
 import logging
+import multiprocessing
+import os
 import re
 import shutil
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import brotli
@@ -32,9 +35,20 @@ PAGE = "index.html"
 #: source of truth for whether a host is served at all.
 MARKER = ".parked"
 
-#: The pages are a few kilobytes and are built once per refresh cycle, so
-#: maximum compression costs nothing worth counting.
-BROTLI_QUALITY = 11
+#: Compression level for the pre-compressed variant.
+#:
+#: Brotli's quality 11 buys 138 bytes over quality 5 — 1.48 kB instead of
+#: 1.62 kB on a 4.2 kB page — and costs about fifty times the CPU: 9.4 ms
+#: against 0.17 ms per page, which over a 36,000-domain estate is the
+#: difference between six seconds and five minutes. The page is read by the
+#: handful of people who typed the domain in, so the bytes are worth nothing
+#: next to the build time. Quality 9 is no smaller than 5 and ten times
+#: slower, which is where the trade-off stops being worth taking.
+BROTLI_QUALITY = 5
+
+#: Gzip is the fallback for the clients that do not speak brotli. A page this
+#: small compresses in the same time at any level, so the best one costs
+#: nothing.
 GZIP_LEVEL = 9
 
 #: Browsers the stylesheet has to keep working on.
@@ -92,27 +106,89 @@ def _stylesheet() -> tuple[str, str]:
 #: than once per site on every rebuild.
 RAW_CSS, CSS = _stylesheet()
 
+#: The workers are forked rather than spawned: a fork inherits the compiled
+#: template and the logging configuration, so a worker costs nothing to
+#: start. The builder is single-threaded, which is what makes forking safe
+#: here; Python 3.14 would default to forkserver, whose workers would
+#: re-import this module and lose the logging setup.
+try:
+    _CONTEXT = multiprocessing.get_context("fork")
+except ValueError:
+    _CONTEXT = multiprocessing.get_context()
 
-def build(sites: list[Site], output_dir: Path) -> None:
-    """Render every site into ``output_dir`` and prune anything stale."""
+#: Sites per task. Large enough for the per-task overhead to disappear,
+#: small enough for the workers to stay evenly loaded.
+_CHUNK = 64
+
+
+def build(sites: list[Site], output_dir: Path, jobs: int | None = None) -> None:
+    """Render every site into ``output_dir`` and prune anything stale.
+
+    ``jobs`` is the number of worker processes; ``None`` means one per usable
+    CPU. Rendering, compressing and writing a page are independent of every
+    other page, so the work is spread over the workers; the pruning stays
+    here, because it is the one step that needs to see the whole list.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    written = 0
     expected: set[str] = set()
-
     for site in sites:
         expected.update(site.hosts)
-        if _write(output_dir / site.serve_host, _page(site)):
-            written += 1
-        # The apex only needs to exist so Caddy will negotiate a certificate
-        # for it; the redirect itself is handled by the static config.
-        _mark(output_dir / site.domain)
+
+    workers = _workers(len(sites), jobs)
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers, mp_context=_CONTEXT) as pool:
+            written = sum(
+                pool.map(
+                    _build_site,
+                    ((output_dir, site) for site in sites),
+                    chunksize=_CHUNK,
+                )
+            )
+    else:
+        written = sum(1 for site in sites if _build_site((output_dir, site)))
 
     pruned = _prune(output_dir, expected)
 
     logger.info(
         "Build complete: %d domains, %d written, %d pruned", len(sites), written, pruned
     )
+
+
+def _build_site(job: tuple[Path, Site]) -> bool:
+    """Render and write one site. True if the page was written.
+
+    A module-level function, because the workers are separate processes and
+    have to be able to pickle it.
+    """
+    output_dir, site = job
+
+    written = _write(output_dir / site.serve_host, _page(site))
+    # The apex only needs to exist so Caddy will negotiate a certificate
+    # for it; the redirect itself is handled by the static config.
+    _mark(output_dir / site.domain)
+
+    return written
+
+
+def _workers(count: int, jobs: int | None) -> int:
+    """How many workers to build with.
+
+    One per usable CPU, and never more than there are sites: a pool of
+    workers with nothing to do is overhead rather than speed. A pool also
+    has to be worth starting at all, which is why a handful of sites is
+    built in one go however many CPUs the machine has.
+    """
+    if jobs is not None:
+        if jobs < 1:
+            raise ValueError("BUILD_JOBS must be at least 1")
+        return min(jobs, count)
+
+    # process_cpu_count() counts the CPUs this process may actually run on,
+    # which is what a container limited to a few CPUs reports; cpu_count()
+    # counts the ones the machine has.
+    cpus = getattr(os, "process_cpu_count", os.cpu_count)() or os.cpu_count() or 1
+    return max(1, min(cpus, count // 2))
 
 
 def _page(site: Site) -> bytes:

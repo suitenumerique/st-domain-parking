@@ -142,6 +142,38 @@ def test_removed_domains_are_pruned(tmp_path, site):
     assert (tmp_path / "www.brigny.fr" / PAGE).exists()
 
 
+def test_workers_build_the_same_tree_as_one_process(tmp_path, site):
+    sites = [
+        Site(**{**vars(site), "domain": f"commune-{index}.fr"}) for index in range(6)
+    ]
+
+    serial = tmp_path / "serial"
+    parallel = tmp_path / "parallel"
+    build(sites, serial, jobs=1)
+    build(sites, parallel, jobs=3)
+
+    assert sorted(path.relative_to(serial) for path in serial.rglob("*")) == sorted(
+        path.relative_to(parallel) for path in parallel.rglob("*")
+    )
+    for path in serial.rglob("*"):
+        if path.is_file():
+            assert (
+                path.read_bytes() == (parallel / path.relative_to(serial)).read_bytes()
+            )
+
+
+def test_the_worker_count_follows_the_request(tmp_path, site):
+    assert render._workers(6, None) >= 1
+    assert render._workers(6, 1) == 1
+    assert render._workers(6, 3) == 3
+    # Never more workers than there are sites to build.
+    assert render._workers(2, 8) == 2
+    # A handful of sites is not worth a pool.
+    assert render._workers(1, None) == 1
+    with pytest.raises(ValueError):
+        render._workers(6, 0)
+
+
 def test_media_queries_stay_in_level_3_syntax(tmp_path, site):
     build([site], tmp_path)
     page = page_of(tmp_path)

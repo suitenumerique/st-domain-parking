@@ -38,6 +38,9 @@ GO_IMAGE            = golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e1
 BUILD_DIR          ?= build
 DOMAINS_URL        ?= ./domains.example.json
 
+# Port the local preview server listens on.
+PREVIEW_PORT       ?= 8081
+
 
 # ==============================================================================
 # RULES
@@ -73,6 +76,21 @@ build: ## generate the parking pages into $(BUILD_DIR)
 		-e DOMAINS_URL=$(DOMAINS_URL) -e OUTPUT_DIR=$(BUILD_DIR) -e REBUILD_INTERVAL=0 \
 		builder-dev python -m builder
 .PHONY: build
+
+# The pages are self-contained, so a plain file server is enough to look at
+# them. The tree is served as it is written, hence the host in the path.
+preview: ## build the pages and serve them locally, to see what they look like
+	@$(MAKE) build
+	@echo ""
+	@$(COMPOSE_RUN) --no-deps -e DOMAINS_URL=$(DOMAINS_URL) builder-dev python -c \
+		"import os; from builder.domains import load; \
+		 print('  $(GREEN)http://localhost:$(PREVIEW_PORT)/' + \
+		 load(os.environ['DOMAINS_URL'])[0].serve_host + '/index.html$(RESET)')"
+	@echo ""
+	@$(COMPOSE_RUN) --no-deps -p $(PREVIEW_PORT):8081 \
+		-v $(CURDIR)/$(BUILD_DIR):/srv:ro builder-dev \
+		python -m http.server 8081 --directory /srv
+.PHONY: preview
 
 lock: ## refresh uv.lock after changing dependencies
 	@$(COMPOSE_RUN_TOOLS) uv lock

@@ -5,10 +5,13 @@
 # runtime with pip/tests/headers stripped out.
 
 ARG PYTHON_VERSION=3.14.8
-ARG UV_VERSION=0.13.0
+ARG UV_VERSION=0.13.4
 
-# Digests resolved on 2026-10-12.
-ARG UV_DIGEST=sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168
+# Digests resolved on 2026-10-21.
+#
+# Python is pinned to the newest 3.14.x, not to 3.15: brotli and lightningcss
+# ship no cp315 wheels yet, and the builder has to install them from a wheel.
+ARG UV_DIGEST=sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b
 ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 ARG DISTROLESS_CC_IMAGE=gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
 

@@ -295,6 +295,22 @@ func (s3 *S3) Exists(ctx context.Context, key string) bool {
 	return exists
 }
 
+// List returns the keys under prefix.
+//
+// LOCAL CHANGE: certmagic's storage contract is hierarchical. List(prefix,
+// false) must return the immediate children of prefix, directories included,
+// so that callers can walk the tree one level at a time; List(prefix, true)
+// returns every descendant. The previous implementation ignored `recursive`
+// and always returned every descendant, which broke certmagic's storage
+// cleaning: it walked the returned keys as if they were directories, so it
+// issued one listing per returned key and never found the per-site assets it
+// looks for.
+//
+// S3 has no directories, but it emulates them: a listing with a "/" delimiter
+// returns the objects directly under the prefix and the shared prefixes of
+// its subdirectories, which is exactly the immediate-children semantics
+// certmagic expects. Directory keys come back without their trailing slash,
+// as they do in certmagic's own file storage.
 func (s3 *S3) List(ctx context.Context, prefix string, recursive bool) ([]string, error) {
 	var keys []string
 
@@ -305,6 +321,9 @@ func (s3 *S3) List(ctx context.Context, prefix string, recursive bool) ([]string
 	input := &s3sdk.ListObjectsV2Input{
 		Bucket: aws.String(s3.Bucket),
 		Prefix: aws.String(fullPrefix),
+	}
+	if !recursive {
+		input.Delimiter = aws.String("/")
 	}
 
 	paginator := s3sdk.NewListObjectsV2Paginator(s3.Client, input)
@@ -319,13 +338,29 @@ func (s3 *S3) List(ctx context.Context, prefix string, recursive bool) ([]string
 			// Strip the configured prefix from the key before appending
 			keys = append(keys, strings.TrimPrefix(key, s3.objName("")))
 		}
+
+		// The subdirectories of the prefix, as opposed to the files in it.
+		// Only a non-recursive listing produces them.
+		for _, common := range result.CommonPrefixes {
+			key := strings.TrimPrefix(aws.ToString(common.Prefix), s3.objName(""))
+			keys = append(keys, strings.TrimSuffix(key, "/"))
+		}
 	}
 
 	return keys, nil
 }
 
+// Stat reports what is known about a key.
+//
+// LOCAL CHANGE: S3 has no directories, so a key that is a prefix of other
+// keys has no object of its own. certmagic's own file storage reports those
+// keys as directories (KeyInfo.IsTerminal false) rather than as missing, and
+// certmagic's account discovery relies on that: it lists the account
+// folders, stats them, and keeps the ones that are not files. Without this,
+// every stat of a folder came back as fs.ErrNotExist and the account was
+// never found.
 func (s3 *S3) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error) {
-	s3.Logger.Info(fmt.Sprintf("Stat: %v", s3.objName(key)))
+	s3.Logger.Debug(fmt.Sprintf("Stat: %v", s3.objName(key)))
 	var ki certmagic.KeyInfo
 
 	input := &s3sdk.HeadObjectInput{
@@ -340,7 +375,7 @@ func (s3 *S3) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error) {
 		// SDK as *types.NotFound. Without isNotFound (lock.go), Stat on a
 		// missing key returned a generic error instead of fs.ErrNotExist.
 		if isNotFound(err) {
-			return ki, fs.ErrNotExist
+			return s3.statDirectory(ctx, key, ki)
 		}
 		return ki, err
 	}
@@ -349,6 +384,31 @@ func (s3 *S3) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error) {
 	ki.Size = aws.ToInt64(result.ContentLength)
 	ki.Modified = aws.ToTime(result.LastModified)
 	ki.IsTerminal = true
+	return ki, nil
+}
+
+// statDirectory reports a key that has no object of its own but is a prefix
+// of other keys as the directory it is.
+func (s3 *S3) statDirectory(ctx context.Context, key string, ki certmagic.KeyInfo) (certmagic.KeyInfo, error) {
+	prefix := strings.TrimSuffix(s3.objName(key), "/") + "/"
+
+	input := &s3sdk.ListObjectsV2Input{
+		Bucket:  aws.String(s3.Bucket),
+		Prefix:  aws.String(prefix),
+		MaxKeys: aws.Int32(1),
+	}
+
+	result, err := s3.Client.ListObjectsV2(ctx, input)
+	if err != nil {
+		return ki, err
+	}
+	if len(result.Contents) == 0 {
+		return ki, fs.ErrNotExist
+	}
+
+	ki.Key = key
+	ki.Modified = aws.ToTime(result.Contents[0].LastModified)
+	ki.IsTerminal = false
 	return ki, nil
 }
 

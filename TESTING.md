@@ -24,7 +24,7 @@ make install          # builds the tooling image every other target runs in
 ## Tier 1 — on every save (~15 s)
 
 ```sh
-make test             # 66 unit tests
+make test             # 68 unit tests
 make lint-check       # ruff format, ruff check, pylint, and the Caddyfile
 ```
 
@@ -97,7 +97,7 @@ docker compose down -v          # when you are done
 make install && make lint-check && make test && make vendor-test && make test-e2e
 ```
 
-Expect: `66 passed`, `10.00/10`, `Valid configuration`, `ok  …certmagic-s3`,
+Expect: `68 passed`, `10.00/10`, `Valid configuration`, `ok  …certmagic-s3`,
 `All end-to-end checks passed`.
 
 ## Tier 4 — vulnerability scan (~1 min)

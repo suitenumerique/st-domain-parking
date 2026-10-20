@@ -33,6 +33,11 @@ def main() -> int:
 
     output_dir = Path(os.environ.get("OUTPUT_DIR", "/srv/sites"))
     interval = int(os.environ.get("REBUILD_INTERVAL", "300"))
+    try:
+        jobs = _jobs()
+    except ValueError as exception:
+        logger.error("%s", exception)
+        return 2
 
     # No thread is started: the Events are only an interruptible sleep. A plain
     # time.sleep() is resumed with the time remaining when a signal arrives
@@ -50,7 +55,7 @@ def main() -> int:
 
     # The first build has to succeed: an empty tree would 404 every parked
     # domain and, worse, teach Caddy's TLS allowlist that none of them exist.
-    if not _rebuild(url, output_dir):
+    if not _rebuild(url, output_dir, jobs):
         logger.error("Initial build failed")
         return 1
 
@@ -68,23 +73,47 @@ def main() -> int:
         wake.clear()
         if stop.is_set():
             break
-        _rebuild(url, output_dir)
+        _rebuild(url, output_dir, jobs)
 
     return 0
 
 
-def _rebuild(url: str, output_dir: Path) -> bool:
+def _rebuild(url: str, output_dir: Path, jobs: int | None) -> bool:
     """Fetch, validate and render. False if the build did not happen.
 
     A failed refresh is not fatal: whatever was built last is still on disk and
     Caddy keeps serving it.
     """
     try:
-        render.build(load(url), output_dir)
+        render.build(load(url), output_dir, jobs=jobs)
     except (DomainsError, OSError) as exception:
         logger.error("Build skipped: %s", exception)
         return False
     return True
+
+
+def _jobs() -> int | None:
+    """The number of build workers. None means one per usable CPU.
+
+    A value that is not a number of workers is refused rather than guessed
+    at: the builder would otherwise start and quietly build with a different
+    number of workers than the operator asked for.
+    """
+    raw = os.environ.get("BUILD_JOBS", "").strip()
+    if not raw:
+        return None
+
+    try:
+        jobs = int(raw)
+    except ValueError as exception:
+        raise ValueError(
+            f"BUILD_JOBS must be a number of workers, got {raw!r}"
+        ) from exception
+
+    if jobs < 1:
+        raise ValueError(f"BUILD_JOBS must be at least 1, got {jobs}")
+
+    return jobs
 
 
 def _on_signal(stop: threading.Event, wake: threading.Event) -> None:

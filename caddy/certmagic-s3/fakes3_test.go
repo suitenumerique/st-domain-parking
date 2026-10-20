@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -85,6 +87,11 @@ func (f *fakeS3) write(key string, body []byte, modified time.Time) string {
 }
 
 func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+		f.list(w, r)
+		return
+	}
+
 	key := strings.TrimPrefix(r.URL.Path, "/test/")
 
 	f.mu.Lock()
@@ -148,4 +155,90 @@ func writeError(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(status)
 	_, _ = fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>%s</Code><Message>%s</Message></Error>`, code, code)
+}
+
+// list implements ListObjectsV2, including the delimiter S3 uses to emulate
+// directories: with a delimiter, the keys that share a prefix up to the next
+// delimiter come back as common prefixes rather than as contents.
+func (f *fakeS3) list(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	prefix := query.Get("prefix")
+	delimiter := query.Get("delimiter")
+	after := query.Get("continuation-token")
+	maxKeys := 1000
+	if raw := query.Get("max-keys"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			maxKeys = parsed
+		}
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	keys := make([]string, 0, len(f.objects))
+	for key := range f.objects {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var contents []string
+	commonPrefixes := make(map[string]struct{})
+	for _, key := range keys {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if after != "" && key <= after {
+			continue
+		}
+		if delimiter != "" {
+			rest := strings.TrimPrefix(key, prefix)
+			if i := strings.Index(rest, delimiter); i >= 0 {
+				commonPrefixes[prefix+rest[:i+len(delimiter)]] = struct{}{}
+				continue
+			}
+		}
+		contents = append(contents, key)
+	}
+
+	truncated := false
+	var nextToken string
+	if len(contents) > maxKeys {
+		contents = contents[:maxKeys]
+		truncated = true
+		nextToken = contents[len(contents)-1]
+	}
+
+	var body strings.Builder
+	body.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
+	body.WriteString(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`)
+	body.WriteString(`<Name>test</Name>`)
+	fmt.Fprintf(&body, `<Prefix>%s</Prefix>`, prefix)
+	fmt.Fprintf(&body, `<KeyCount>%d</KeyCount>`, len(contents)+len(commonPrefixes))
+	fmt.Fprintf(&body, `<MaxKeys>%d</MaxKeys>`, maxKeys)
+	fmt.Fprintf(&body, `<IsTruncated>%t</IsTruncated>`, truncated)
+	if truncated {
+		fmt.Fprintf(&body, `<NextContinuationToken>%s</NextContinuationToken>`, nextToken)
+	}
+	for _, key := range contents {
+		obj := f.objects[key]
+		body.WriteString(`<Contents>`)
+		fmt.Fprintf(&body, `<Key>%s</Key>`, key)
+		fmt.Fprintf(&body, `<LastModified>%s</LastModified>`, obj.modified.UTC().Format(time.RFC3339))
+		fmt.Fprintf(&body, `<ETag>%s</ETag>`, obj.etag)
+		fmt.Fprintf(&body, `<Size>%d</Size>`, len(obj.body))
+		body.WriteString(`</Contents>`)
+	}
+	prefixes := make([]string, 0, len(commonPrefixes))
+	for key := range commonPrefixes {
+		prefixes = append(prefixes, key)
+	}
+	sort.Strings(prefixes)
+	for _, key := range prefixes {
+		fmt.Fprintf(&body, `<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>`, key)
+	}
+	body.WriteString(`</ListBucketResult>`)
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(body.String()))
 }
