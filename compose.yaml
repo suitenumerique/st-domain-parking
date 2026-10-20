@@ -85,6 +85,10 @@ services:
       # failure mode is "local HTTPS needs DNS", not "production quietly
       # serves untrusted certificates". `make test-e2e` sets it to internal.
       CADDY_TLS_ISSUER: ${CADDY_TLS_ISSUER:-}
+      # Empty disables the helpcenter redirect. Caddy reads both at request
+      # time, so a change needs a new container (`up -d`), not a reload.
+      HELPCENTER_REDIRECT_HOSTS: ${HELPCENTER_REDIRECT_HOSTS:-}
+      HELPCENTER_REDIRECT_TARGET: ${HELPCENTER_REDIRECT_TARGET:-}
       # Certificate storage. Empty S3_ENDPOINT means real AWS.
       S3_BUCKET: ${S3_BUCKET:-caddy-certs}
       S3_REGION: ${S3_REGION:-us-east-1}

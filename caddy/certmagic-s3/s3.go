@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/smithy-go/logging"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/certmagic"
@@ -81,6 +82,7 @@ func (s3 *S3) Provision(ctx caddy.Context) error {
 func (s3 *S3) buildS3Client() (*s3sdk.Client, error) {
 	configOptions := []func(*config.LoadOptions) error{
 		config.WithRegion(s3.Region),
+		config.WithLogger(sdkLogger{s3.Logger}),
 	}
 
 	if s3.Endpoint != "" {
@@ -393,6 +395,25 @@ func (s3 *S3) String() string {
 // leak a field somebody adds to the struct later.
 func (s3 *S3) MarshalLogObject(zapcore.ObjectEncoder) error {
 	return nil
+}
+
+// LOCAL CHANGE: the SDK logs to stderr by default, outside Caddy's structured
+// log and without a level filter. This bridge sends the SDK log calls to
+// zap, so Caddy's level applies.
+type sdkLogger struct{ logger *zap.Logger }
+
+func (l sdkLogger) Logf(classification logging.Classification, format string, v ...any) {
+	level := zapcore.InfoLevel
+	switch classification {
+	case logging.Debug:
+		level = zapcore.DebugLevel
+	case logging.Warn:
+		level = zapcore.WarnLevel
+	}
+	if !l.logger.Core().Enabled(level) {
+		return
+	}
+	l.logger.Log(level, fmt.Sprintf(format, v...))
 }
 
 // validateHost reports whether host is a bare hostname, optionally with a

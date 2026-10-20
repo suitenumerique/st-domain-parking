@@ -158,6 +158,9 @@ Caddy:
 | `HTTP_PORT` / `HTTPS_PORT` | `8080` / `8443` | Ports inside the container |
 | `ASK_PORT` | `9000` | Loopback port for the TLS allowlist endpoint |
 | `CADDY_TLS_ISSUER` | *(empty)* | Empty is real ACME; `internal` uses Caddy's local CA |
+| `HELPCENTER_REDIRECT_HOSTS` | *(empty)* | Space-separated, lowercase hostnames to redirect to the helpcenter |
+| `HELPCENTER_REDIRECT_TARGET` | *(empty)* | Absolute URL of the helpcenter page |
+
 
 Certificate storage (see below):
 

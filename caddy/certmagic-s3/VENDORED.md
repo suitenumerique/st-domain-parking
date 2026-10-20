@@ -95,14 +95,24 @@ Every one is marked `LOCAL CHANGE` in the source.
    IPv6 address, because `net.ParseIP` recognises it before the colon check
    runs.
 
+5. **SDK logs go through zap.** The SDK's default logger is
+   `logging.NewStandardLogger(os.Stderr)`. It prints a line such as
+   `SDK <time> DEBUG Response has no supported checksum.` on every
+   successful `GetObject`. A store without checksum support, such as
+   RustFS, triggers it. These lines sit outside Caddy's JSON log, and the
+   default logger has no level filter. `sdkLogger` sends the SDK log calls
+   to zap, so Caddy's log level applies. The checksum line is `Debug` in
+   the pinned SDK, so it stays hidden unless Caddy runs with the `debug`
+   global option. SDK warnings still show.
+
 ### Local-only files
 
 - `VENDORED.md` — this file.
 - `local_test.go` — tests for behaviour upstream does not have:
   `TestValidateHost`, `TestStringHidesCredentials`,
   `TestCleanupStopsRefreshing`, and `TestStatAndLoadReportNotExist`.
-- `log_test.go` — tests the log-redaction change (`MarshalLogObject`), which
-  upstream does not have.
+- `log_test.go` — tests the log-redaction change (`MarshalLogObject`) and the
+  SDK log bridge (`sdkLogger`). Upstream has neither.
 
 ### Omitted upstream files
 
