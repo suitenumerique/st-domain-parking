@@ -9,7 +9,7 @@ cache — a cold run is dominated by image builds, not by the tests.
 ## Before you start
 
 ```sh
-make install          # builds the tooling image every other target runs in
+make install          # builds the images and pulls the Go image the other targets run in
 ```
 
 - **Docker** with Compose v2. Nothing else: every target below runs in a
@@ -24,28 +24,29 @@ make install          # builds the tooling image every other target runs in
 ## Tier 1 — on every save (~15 s)
 
 ```sh
-make test             # 68 unit tests
-make lint-check       # ruff format, ruff check, pylint, and the Caddyfile
+make test             # the builder's unit tests, with -race
+make lint-check       # gofmt, go vet, and the Caddyfile
 ```
 
-Covers the page builder end to end in-process: domain-list validation and its
-error paths, rendering, escaping, compression, pruning, and the signal
-handling (which runs the module as a real child process, because signal
-disposition does not exist inside the test interpreter).
+Covers the page builder: domain-list validation and its error paths,
+rendering, escaping, the stylesheet's syntax, compression, pruning, and the
+signal handling and exit codes (which run the builder as a real child process).
 
-Does **not** touch Go, Caddy, or S3.
+Does **not** touch Caddy or S3.
 
-Narrow it while you work — the tooling container takes any pytest arguments:
+Narrow it while you work:
 
 ```sh
-docker compose run --rm --no-deps builder-dev pytest -k sighup -q
-docker compose run --rm --no-deps builder-dev pytest builder/tests/test_render.py -q
+docker run --rm -v "$PWD/builder":/src -w /src \
+  golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc \
+  go test -run SIGHUP .
 ```
 
-## Tier 2 — before pushing Go changes (~60 s)
+## Tier 2 — before pushing changes under caddy/ (~60 s)
 
 ```sh
 make vendor-test      # gofmt, go vet, go test -race
+make test-adapter     # the same, for the Caddy config adapter
 ```
 
 The `-race` matters: the storage plugin runs a refresher goroutine per held
@@ -58,11 +59,12 @@ locking, hammer it:
 
 ```sh
 docker run --rm -v "$PWD/caddy/certmagic-s3":/src -w /src \
-  golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c \
+  golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc \
   go test -race -count=50 -run TestLockIsExclusiveAcrossInstances ./...
 ```
 
-Keep this image the same as `GO_IMAGE` in the Makefile.
+Keep this image the same as `GO_IMAGE` in the Makefile and the root
+`Dockerfile`.
 
 ## Tier 3 — before deploying (~13 s warm)
 
@@ -94,11 +96,11 @@ docker compose down -v          # when you are done
 ## Full sweep
 
 ```sh
-make install && make lint-check && make test && make vendor-test && make test-e2e
+make install && make lint-check && make test && make vendor-test && make test-adapter && make test-e2e
 ```
 
-Expect: `68 passed`, `10.00/10`, `Valid configuration`, `ok  …certmagic-s3`,
-`All end-to-end checks passed`.
+Expect: `Valid configuration`, `ok  …builder`, `ok  …certmagic-s3`,
+`ok  …caddy/adapter`, `All end-to-end checks passed`.
 
 ## Tier 4 — vulnerability scan (~1 min)
 
@@ -116,9 +118,9 @@ Expect: no finding, or only findings whose fix the project cannot take
 yet. Decide what to do with each one, and check its CVE record: grype can
 match a version range too widely.
 
-The Debian packages in the distroless base (`libc6`, `zlib1g`, `libstdc++6`)
-carry findings with no fix in Debian 13. `--only-fixed` leaves them out of
-the gate; the full report `grype docker:<image>` still lists them.
+The Debian packages in the distroless base can carry findings with no fix in
+Debian 13. `--only-fixed` leaves them out of the gate; the full report
+`grype docker:<image>` still lists them.
 
 ## Checks nothing automates
 
@@ -130,10 +132,10 @@ make build            # writes ./build, owned by you rather than by root
 # then open build/www.brigny.fr/index.html
 ```
 
-Narrow the window under 560 px. The mobile layout collapsing is the thing the
-pinned browser targets in `builder/render.py` exist to protect: a minifier that
-rewrites the media query to Level 4 range syntax makes this silently vanish on
-older browsers, and no test in this repo renders anything.
+Narrow the window under 560 px. The mobile layout collapsing is what
+`stripCSS` in `builder/render.go` protects by only stripping whitespace: a CSS
+minifier that rewrites the media query to Level 4 range syntax makes it
+silently vanish on older browsers, and no test in this repo renders anything.
 
 **SIGHUP refetches without stopping the builder.**
 
@@ -157,13 +159,7 @@ docker compose logs caddy --no-color | grep -c rustfsadmin      # must be 0
 issuance until it expires.
 
 ```sh
-docker compose run --rm --no-deps --entrypoint python bucket-init -c "
-import boto3
-c = boto3.client('s3', endpoint_url='http://rustfs:9000',
-                 aws_access_key_id='rustfsadmin', aws_secret_access_key='rustfsadmin',
-                 region_name='us-east-1')
-print([o['Key'] for o in c.list_objects_v2(Bucket='caddy-certs').get('Contents', [])])
-"
+docker compose run --rm --no-deps bucket-init keys | grep '\.lock$'   # must be empty
 ```
 
 **Two instances on one bucket** — a smoke test, see the gap below.
@@ -190,9 +186,9 @@ Worth knowing before you trust a green run.
 - **No real ACME server is exercised.** The e2e uses the internal CA, so
   rate limits, challenge types and issuer quirks are untested here.
 - **Nothing renders the page.** Every visual property is checked as a string.
-- **The domain list is only ever read from a file locally.** The `https://` and
-  `s3://` paths in `builder/domains.py` have unit tests, but no local run
-  fetches over the network.
+- **The domain list is only ever read from a file locally.** The `https://`
+  and `s3://` paths in `builder/domains.go` are unit-tested against local
+  fakes, not against a real server or store.
 
 ## Troubleshooting
 

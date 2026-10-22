@@ -12,7 +12,6 @@ set -euo pipefail
 COMPOSE=(docker compose)
 HTTP=http://localhost:${HTTP_BIND:-8080}
 HTTPS_PORT=${HTTPS_BIND:-8443}
-BUCKET=${S3_BUCKET:-caddy-certs}
 
 PARKED=www.brigny.fr
 APEX=brigny.fr
@@ -43,8 +42,9 @@ probe() {
 		"https://$host:$HTTPS_PORT$path" 2>/dev/null || true
 }
 
+# The bucket, through s3dev (builder/cmd/s3dev): `s3 keys`, `s3 put KEY BODY`.
 s3() {
-	"${COMPOSE[@]}" run --rm --no-deps --entrypoint python bucket-init -c "$1"
+	"${COMPOSE[@]}" run --rm --no-deps bucket-init "$@"
 }
 
 cleanup() {
@@ -98,7 +98,7 @@ check "heartbeat with slash answers too" "200" "$(probe "$PARKED" /__lbheartbeat
 echo
 echo "Content"
 page=$(curl -sk --resolve "$PARKED:$HTTPS_PORT:127.0.0.1" "https://$PARKED:$HTTPS_PORT/")
-grep -q 'content=noindex name=robots' <<<"$page" &&
+grep -Eq '<meta name=robots content="?noindex' <<<"$page" &&
 	pass "the page is noindex" || fail "the page is noindex"
 grep -q 'mairie de Brigny (87200)' <<<"$page" &&
 	pass "the page carries the commune" || fail "the page carries the commune"
@@ -141,15 +141,11 @@ check "SDK debug lines stay out of the logs" "0" "$sdk_debug_lines"
 
 echo
 echo "Certificate storage in S3"
-s3 "
-import boto3, sys
-c = boto3.client('s3', endpoint_url='http://rustfs:9000',
-                 aws_access_key_id='rustfsadmin', aws_secret_access_key='rustfsadmin',
-                 region_name='us-east-1')
-c.put_object(Bucket='$BUCKET', Key='unrelated/keepme.txt', Body=b'outside the prefix')
-keys = [o['Key'] for o in c.list_objects_v2(Bucket='$BUCKET').get('Contents', [])]
-sys.exit(0 if any(k.endswith('.crt') for k in keys) and any(k.endswith('.key') for k in keys) else 1)
-" >/dev/null 2>&1 && pass "certificates and keys are stored in S3" ||
+s3 put unrelated/keepme.txt 'outside the prefix' >/dev/null 2>&1 ||
+	fail "storing an object outside the prefix"
+keys=$(s3 keys 2>/dev/null || true)
+[[ $keys == *.crt* && $keys == *.key* ]] &&
+	pass "certificates and keys are stored in S3" ||
 	fail "certificates and keys are stored in S3"
 
 # Upstream issue #21: storage cleaning listed the whole bucket and deleted
@@ -157,14 +153,9 @@ sys.exit(0 if any(k.endswith('.crt') for k in keys) and any(k.endswith('.key') f
 # configured prefix must survive.
 "${COMPOSE[@]}" restart caddy >/dev/null 2>&1
 sleep 8
-s3 "
-import boto3, sys
-c = boto3.client('s3', endpoint_url='http://rustfs:9000',
-                 aws_access_key_id='rustfsadmin', aws_secret_access_key='rustfsadmin',
-                 region_name='us-east-1')
-keys = [o['Key'] for o in c.list_objects_v2(Bucket='$BUCKET').get('Contents', [])]
-sys.exit(0 if 'unrelated/keepme.txt' in keys else 1)
-" >/dev/null 2>&1 && pass "storage cleaning spares objects outside the prefix (issue #21)" ||
+keys=$(s3 keys 2>/dev/null || true)
+grep -qx 'unrelated/keepme.txt' <<<"$keys" &&
+	pass "storage cleaning spares objects outside the prefix (issue #21)" ||
 	fail "storage cleaning spares objects outside the prefix (issue #21)"
 
 echo

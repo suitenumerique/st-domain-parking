@@ -145,8 +145,19 @@ func TestStatAndLoadReportNotExist(t *testing.T) {
 // prefix instead makes the caller treat every file as a directory, which
 // costs one listing per file and finds nothing.
 func TestListReturnsImmediateChildren(t *testing.T) {
+	// With and without a storage prefix, which every returned key, directory
+	// or file, has to be stripped of.
+	for _, storagePrefix := range []string{"", "caddy"} {
+		t.Run("prefix="+storagePrefix, func(t *testing.T) {
+			testListReturnsImmediateChildren(t, storagePrefix)
+		})
+	}
+}
+
+func testListReturnsImmediateChildren(t *testing.T, storagePrefix string) {
 	f, srv := newFakeS3(t)
 	s := f.instance(srv)
+	s.Prefix = storagePrefix
 
 	seeded := []string{
 		"certificates/issuer/site-a/site-a.crt",
@@ -156,7 +167,7 @@ func TestListReturnsImmediateChildren(t *testing.T) {
 		"ocsp/site-a-abcdef",
 	}
 	for _, key := range seeded {
-		f.seed(key, time.Now())
+		f.seed(s.objName(key), time.Now())
 	}
 
 	tests := []struct {
@@ -219,7 +230,11 @@ func TestStatReportsDirectory(t *testing.T) {
 	f, srv := newFakeS3(t)
 	s := f.instance(srv)
 
-	f.seed("acme/ca/users/admin/admin.key", time.Now())
+	older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+	// Seeded so that the newer object does not come first in a listing.
+	f.seed("acme/ca/users/admin/admin.json", older)
+	f.seed("acme/ca/users/admin/admin.key", newer)
 
 	info, err := s.Stat(context.Background(), "acme/ca/users/admin")
 	if err != nil {
@@ -227,6 +242,19 @@ func TestStatReportsDirectory(t *testing.T) {
 	}
 	if info.IsTerminal {
 		t.Error("Stat on a directory reported a file")
+	}
+	// certmagic picks the most recent account by this time.
+	if !info.Modified.Equal(newer) {
+		t.Errorf("Stat on a directory: modified %v, want the newest object's %v", info.Modified, newer)
+	}
+
+	// A directory holding only directories is still a directory.
+	info, err = s.Stat(context.Background(), "acme/ca")
+	if err != nil {
+		t.Fatalf("Stat on a directory of directories: %v", err)
+	}
+	if info.IsTerminal {
+		t.Error("Stat on a directory of directories reported a file")
 	}
 
 	info, err = s.Stat(context.Background(), "acme/ca/users/admin/admin.key")
@@ -239,5 +267,25 @@ func TestStatReportsDirectory(t *testing.T) {
 
 	if _, err := s.Stat(context.Background(), "acme/ca/users/nobody"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Stat on a missing key: got %v, want fs.ErrNotExist", err)
+	}
+}
+
+// certmagic's Storage contract has Exists true for a directory as well as a
+// file, in agreement with Stat.
+func TestExistsReportsDirectory(t *testing.T) {
+	f, srv := newFakeS3(t)
+	s := f.instance(srv)
+
+	f.seed("acme/ca/users/admin/admin.key", time.Now())
+
+	for key, want := range map[string]bool{
+		"acme/ca/users/admin/admin.key": true,
+		"acme/ca/users/admin":           true,
+		"acme/ca/users/adm":             false,
+		"acme/ca/users/nobody":          false,
+	} {
+		if got := s.Exists(context.Background(), key); got != want {
+			t.Errorf("Exists(%q) = %t, want %t", key, got, want)
+		}
 	}
 }

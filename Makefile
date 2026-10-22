@@ -22,21 +22,27 @@ GREEN := \033[1;32m
 DOCKER_UID          = $(shell id -u)
 DOCKER_GID          = $(shell id -g)
 DOCKER_USER         = $(DOCKER_UID):$(DOCKER_GID)
-COMPOSE             = DOCKER_USER=$(DOCKER_USER) docker compose
+COMPOSE             = docker compose
 COMPOSE_RUN         = $(COMPOSE) run --rm --build
-# Everything Python runs here: same image as the builder, plus the dev extras.
-# Docker is the only supported way to work on this repo, so there is no host
-# toolchain to keep in step.
-COMPOSE_RUN_TOOLS   = $(COMPOSE_RUN) --no-deps builder-dev
 
 # -- Go
-GO_IMAGE            = golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
+# Every Go command runs in this image: Docker is the only supported way to
+# work on this repo, so there is no host toolchain to keep in step. Also
+# pinned in the root Dockerfile.
+GO_IMAGE            = golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc
+# Runs as whoever ran make, so files it writes in the tree belong to them.
+GO_RUN              = docker run --rm -u $(DOCKER_USER) -e HOME=/tmp -e GOCACHE=/tmp/go-build \
+                      -e GOPATH=/tmp/go -v $(CURDIR)/builder:/src -w /src $(GO_IMAGE)
 
 # -- Build
 # Local build target for `make build`: the generated tree is written here so it
 # can be inspected without a container.
 BUILD_DIR          ?= build
 DOMAINS_URL        ?= ./domains.example.json
+# The builder image, reading the domain list from the working tree. Quiet, so
+# that its standard output is only what the builder prints.
+BUILDER_RUN         = $(COMPOSE_RUN) --quiet-build --no-deps -v $(CURDIR):/app:ro -w /app \
+                      -e DOMAINS_URL=$(DOMAINS_URL) builder
 
 # Port the local preview server listens on.
 PREVIEW_PORT       ?= 8081
@@ -63,18 +69,21 @@ bootstrap: \
 	@echo ""
 .PHONY: bootstrap
 
-install: ## build the tooling image the other targets run in
-	@$(COMPOSE) build builder-dev
+install: ## build the images and pull the Go image the other targets run in
+	@$(COMPOSE) build builder bucket-init
+	@docker pull -q $(GO_IMAGE)
 .PHONY: install
 
 # -- Build
 
-# Spelled out rather than reusing COMPOSE_RUN_TOOLS: `run` only accepts -e
-# before the service name, and the variable ends with it.
+# The directory is created first, so that it belongs to you rather than to
+# Docker.
 build: ## generate the parking pages into $(BUILD_DIR)
-	@$(COMPOSE_RUN) --no-deps \
-		-e DOMAINS_URL=$(DOMAINS_URL) -e OUTPUT_DIR=$(BUILD_DIR) -e REBUILD_INTERVAL=0 \
-		builder-dev python -m builder
+	@mkdir -p $(BUILD_DIR)
+	@$(COMPOSE_RUN) --no-deps -u $(DOCKER_USER) -v $(CURDIR):/app:ro -w /app \
+		-v $(abspath $(BUILD_DIR)):/out \
+		-e DOMAINS_URL=$(DOMAINS_URL) -e OUTPUT_DIR=/out -e REBUILD_INTERVAL=0 \
+		builder
 .PHONY: build
 
 # The pages are self-contained, so a plain file server is enough to look at
@@ -82,19 +91,12 @@ build: ## generate the parking pages into $(BUILD_DIR)
 preview: ## build the pages and serve them locally, to see what they look like
 	@$(MAKE) build
 	@echo ""
-	@$(COMPOSE_RUN) --no-deps -e DOMAINS_URL=$(DOMAINS_URL) builder-dev python -c \
-		"import os; from builder.domains import load; \
-		 print('  $(GREEN)http://localhost:$(PREVIEW_PORT)/' + \
-		 load(os.environ['DOMAINS_URL'])[0].serve_host + '/index.html$(RESET)')"
+	@echo "  $(GREEN)http://localhost:$(PREVIEW_PORT)/$$($(BUILDER_RUN) hosts | cut -d' ' -f1)/index.html$(RESET)"
 	@echo ""
-	@$(COMPOSE_RUN) --no-deps -p $(PREVIEW_PORT):8081 \
-		-v $(CURDIR)/$(BUILD_DIR):/srv:ro builder-dev \
-		python -m http.server 8081 --directory /srv
+	@$(COMPOSE_RUN) --no-deps -p 127.0.0.1:$(PREVIEW_PORT):8081 \
+		-v $(abspath $(BUILD_DIR)):/preview:ro caddy \
+		file-server --root /preview --listen :8081
 .PHONY: preview
-
-lock: ## refresh uv.lock after changing dependencies
-	@$(COMPOSE_RUN_TOOLS) uv lock
-.PHONY: lock
 
 clean: ## remove the generated pages
 	@rm -rf $(BUILD_DIR)
@@ -107,9 +109,7 @@ down: ## stop and remove the containers
 .PHONY: down
 
 hosts: ## print the /etc/hosts line that points the parked domains here
-	@$(COMPOSE_RUN) --no-deps -e DOMAINS_URL=$(DOMAINS_URL) builder-dev python -c \
-		"import os; from builder.domains import load; \
-		 print('127.0.0.1 ' + ' '.join(h for s in load(os.environ['DOMAINS_URL']) for h in s.hosts))"
+	@echo "127.0.0.1 $$($(BUILDER_RUN) hosts)"
 .PHONY: hosts
 
 logs: ## follow the container logs
@@ -144,52 +144,41 @@ stop: ## stop the containers without removing them
 
 # -- Linters
 
-lint: ## run all linters (with auto-fix)
+lint: ## format the Go code, then run all linters
 lint: \
-	lint-ruff-format \
-	lint-ruff \
-	lint-pylint \
-	lint-caddy
+	lint-go-format \
+	lint-check
 .PHONY: lint
 
 lint-check: ## run all linters in check mode (no auto-fix)
 lint-check: \
-	lint-ruff-format-check \
-	lint-ruff-check \
-	lint-pylint \
-	lint-caddy
+	lint-caddy \
+	lint-go
 .PHONY: lint-check
 
 lint-caddy: ## validate the Caddyfile
 	@$(COMPOSE_RUN) --no-deps caddy \
-		validate --config /etc/caddy/Caddyfile --adapter caddyfile
+		validate --config /etc/caddy/Caddyfile --adapter parking
 .PHONY: lint-caddy
 
-lint-pylint: ## run pylint
-	@$(COMPOSE_RUN_TOOLS) pylint builder
-.PHONY: lint-pylint
+lint-go: ## check the builder's formatting and run go vet
+	@$(GO_RUN) sh -c '! gofmt -l . | grep . && go vet ./...'
+.PHONY: lint-go
 
-lint-ruff: ## run ruff (with auto-fix)
-	@$(COMPOSE_RUN_TOOLS) ruff check . --fix
-.PHONY: lint-ruff
-
-lint-ruff-check: ## run ruff in check mode
-	@$(COMPOSE_RUN_TOOLS) ruff check .
-.PHONY: lint-ruff-check
-
-lint-ruff-format: ## run ruff-format
-	@$(COMPOSE_RUN_TOOLS) ruff format .
-.PHONY: lint-ruff-format
-
-lint-ruff-format-check: ## run ruff-format in check mode
-	@$(COMPOSE_RUN_TOOLS) ruff format . --check
-.PHONY: lint-ruff-format-check
+lint-go-format: ## format the builder's Go code
+	@$(GO_RUN) gofmt -w .
+.PHONY: lint-go-format
 
 # -- Tests
 
-test: ## run the unit tests
-	@$(COMPOSE_RUN_TOOLS) pytest --cov=builder
+test: ## run the builder's unit tests
+	@$(GO_RUN) go test -race ./...
 .PHONY: test
+
+test-adapter: ## vet and test the Caddy config adapter
+	@docker run --rm -v $(PWD)/caddy/adapter:/src -w /src $(GO_IMAGE) sh -c '\
+		! gofmt -l . | grep . && go vet ./... && go test -race ./...'
+.PHONY: test-adapter
 
 test-e2e: ## run the end-to-end tests (brings the stack up against RustFS)
 	@./scripts/e2e.sh
@@ -199,7 +188,7 @@ test-e2e: ## run the end-to-end tests (brings the stack up against RustFS)
 
 vendor-update: ## update, vet and test the vendored certmagic-s3 plugin
 	@docker run --rm -v $(PWD)/caddy/certmagic-s3:/src -w /src $(GO_IMAGE) sh -c '\
-		go get -u ./... && go mod tidy && gofmt -l . && go vet ./... && go test -race ./...'
+		go get -u ./... && go mod tidy && ! gofmt -l . | grep . && go vet ./... && go test -race ./...'
 	@echo "$(BOLD)Re-apply any LOCAL CHANGE hunks upstream has moved under.$(RESET)"
 .PHONY: vendor-update
 
@@ -207,7 +196,7 @@ vendor-update: ## update, vet and test the vendored certmagic-s3 plugin
 # a refresher goroutine per held lock, and several instances on one bucket.
 vendor-test: ## vet and test the vendored certmagic-s3 plugin
 	@docker run --rm -v $(PWD)/caddy/certmagic-s3:/src -w /src $(GO_IMAGE) sh -c '\
-		gofmt -l . && go vet ./... && go test -race ./...'
+		! gofmt -l . | grep . && go vet ./... && go test -race ./...'
 .PHONY: vendor-test
 
 # -- Misc

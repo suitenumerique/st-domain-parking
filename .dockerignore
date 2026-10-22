@@ -1,16 +1,3 @@
-.git/
-.venv/
-.env
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-.coverage
-build/
-dist/
-caddy-data/
-caddy-config/
-parking/tests/
-Makefile
-README.md
+# The root image is built from builder/ alone. caddy/ is its own context.
+*
+!builder/

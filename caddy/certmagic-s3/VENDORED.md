@@ -115,7 +115,8 @@ Every one is marked `LOCAL CHANGE` in the source.
    per certificate — and never finds the per-site assets it is looking for.
    With an estate of tens of thousands of certificates that is hundreds of
    thousands of listings per pass, and expired certificates are never
-   reclaimed.
+   reclaimed. It also broke the account lookup by key, which lists the
+   users folder and takes each entry's base name as an account email.
 
    S3 has no directories but emulates them: a listing with a `/` delimiter
    returns the objects directly under the prefix and the shared prefixes of
@@ -124,13 +125,18 @@ Every one is marked `LOCAL CHANGE` in the source.
    slash, as they do in certmagic's own file storage. A recursive listing
    is unchanged.
 
-7. **`Stat()` reports a directory as a directory.** S3 has no object for a
+7. **`Stat()` and `Exists()` report a directory as a directory.** S3 has no object for a
    key that is only a prefix of other keys, so `Stat()` used to answer
    `fs.ErrNotExist` for it. certmagic's own file storage answers
    `KeyInfo.IsTerminal == false` instead, and certmagic's account
    discovery relies on that: it lists the account folders, stats them, and
    keeps the ones that are not files. `Stat()` now looks for objects under
-   the key and, finding any, reports the key as the directory it is.
+   the key and, finding any, reports the key as the directory it is. Its
+   modification time is that of the newest object directly under it, since
+   certmagic picks the most recent account by it.
+
+   `Exists()` agrees: certmagic's contract has it true for a directory too.
+   It lists the key's children only when there is no object at the key.
 
 8. **`Stat()` logs at debug level.** It logged one line per key at INFO.
    certmagic's storage cleaning stats a key per certificate, so that is one
@@ -143,7 +149,8 @@ Every one is marked `LOCAL CHANGE` in the source.
 - `local_test.go` — tests for behaviour upstream does not have:
   `TestValidateHost`, `TestStringHidesCredentials`,
   `TestCleanupStopsRefreshing`, `TestStatAndLoadReportNotExist`,
-  `TestListReturnsImmediateChildren` and `TestStatReportsDirectory`.
+  `TestListReturnsImmediateChildren`, `TestStatReportsDirectory` and
+  `TestExistsReportsDirectory`.
 - `log_test.go` — tests the log-redaction change (`MarshalLogObject`) and the
   SDK log bridge (`sdkLogger`). Upstream has neither.
 - `fakes3_test.go` — the in-memory S3 used by the tests. It now also

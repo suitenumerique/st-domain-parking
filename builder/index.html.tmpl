@@ -1,32 +1,30 @@
-{#
+{{- /*
   Parking page for a single domain.
 
-  Rendered once per domain at build time, then minified and pre-compressed.
-  The output is deliberately self-contained: inline CSS, a data-URI favicon,
-  no scripts and no external requests of any kind.
-#}
-{#- `-%}` and `{%-` so the value is the sentence alone, with no indentation
-    from this block leaking into the meta description. #}
-{%- set heading -%}
-  Ce domaine appartient à la mairie de {{ site.commune_name }} ({{ site.commune_zipcode }}).
-{%- endset %}
+  Minified once when the builder starts, then rendered once per domain and
+  pre-compressed. The output is deliberately self-contained: inline CSS, a
+  data-URI favicon, no scripts and no external requests of any kind.
+
+  html/template escapes every value for the context it lands in.
+*/ -}}
+{{- $heading := printf "Ce domaine appartient à la mairie de %s (%s)." .CommuneName .CommuneZipcode -}}
 <!doctype html>
 <html lang="fr">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{ site.domain }}</title>
-    <meta name="description" content="{{ heading }}">
-    {#-
+    <title>{{ .Domain }}</title>
+    <meta name="description" content="{{ $heading }}">
+    {{- /*
       This page is meant to be reached by typing the domain, not from search.
       The authoritative record is the Service-Public listing, so stay out of
       the index rather than compete with it. `follow` is left implicit: the
       outbound links are worth following.
-    #}
+    */ -}}
     <meta name="robots" content="noindex">
     <meta name="color-scheme" content="light">
-    <link rel="canonical" href="https://www.{{ site.domain }}/">
-    {#- The accent dot from the design, inline so the page makes no requests. #}
+    <link rel="canonical" href="https://www.{{ .Domain }}/">
+    {{- /* The accent dot from the design, inline so the page makes no requests. */ -}}
     <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Ccircle%20cx='16'%20cy='16'%20r='16'%20fill='%231f5c53'/%3E%3C/svg%3E">
 
     <style>
@@ -238,34 +236,34 @@
       <div class="card-head">
         <div class="dot"></div>
         <div>
-          <div class="domain">{{ site.domain }}</div>
+          <div class="domain">{{ .Domain }}</div>
           <div class="tagline">Page de présence minimale</div>
         </div>
       </div>
 
       <div class="card-body">
-        <h1>{{ heading }}</h1>
+        <h1>{{ $heading }}</h1>
 
         <div class="lede">
           <p>
             Vous pouvez vérifier qu'elle en est bien propriétaire sur
-            l'<a href="{{ site.service_public_url }}">Annuaire du Service Public</a>.
+            l'<a href="{{ .ServicePublicURL }}">Annuaire du Service Public</a>.
           </p>
           <p>La commune n'a pas de site Internet pour l'instant.</p>
         </div>
 
         <div class="rows">
-          <a class="row" href="mailto:{{ site.email }}">
+          <a class="row" href="mailto:{{ .Email }}">
             <span class="label">Contact de la mairie</span>
-            <span class="value accent">{{ site.email }}</span>
+            <span class="value accent">{{ .Email }}</span>
           </a>
 
-          <a class="row" href="{{ site.service_public_url }}" rel="noopener">
+          <a class="row" href="{{ .ServicePublicURL }}" rel="noopener">
             <span class="label">Plus d'informations (horaires, adresse, services, ...)</span>
             <span class="value">service-public.gouv.fr &#8599;</span>
           </a>
 
-          <a class="row" href="https://suiteterritoriale.anct.gouv.fr/bienvenue/{{ site.siret }}" rel="noopener">
+          <a class="row" href="https://suiteterritoriale.anct.gouv.fr/bienvenue/{{ .Siret }}" rel="noopener">
             <span class="label">Présence numérique</span>
             <span class="value">suiteterritoriale.anct.gouv.fr &#8599;</span>
           </a>

@@ -287,6 +287,13 @@ func (s3 *S3) Exists(ctx context.Context, key string) bool {
 	_, err := s3.Client.HeadObject(ctx, input)
 	exists := err == nil
 
+	// LOCAL CHANGE: certmagic's Storage contract has Exists true for a key
+	// that is a directory too, as Stat reports one. S3 has no object for it,
+	// so look for objects under it. Only a missing key pays for the listing.
+	if isNotFound(err) {
+		exists, _ = s3.hasChildren(ctx, key)
+	}
+
 	s3.Logger.Debug("existence check completed",
 		zap.String("key", objName),
 		zap.Bool("exists", exists),
@@ -389,27 +396,63 @@ func (s3 *S3) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error) {
 
 // statDirectory reports a key that has no object of its own but is a prefix
 // of other keys as the directory it is.
+//
+// Its modification time is that of the newest object directly under it,
+// the closest S3 has to a directory mtime. certmagic sorts account folders
+// by it to pick the most recent account. That takes a full listing of the
+// directory's own level, which is fine for the folders certmagic stats: an
+// account folder holds two files.
 func (s3 *S3) statDirectory(ctx context.Context, key string, ki certmagic.KeyInfo) (certmagic.KeyInfo, error) {
-	prefix := strings.TrimSuffix(s3.objName(key), "/") + "/"
+	input := &s3sdk.ListObjectsV2Input{
+		Bucket:    aws.String(s3.Bucket),
+		Prefix:    aws.String(s3.dirName(key)),
+		Delimiter: aws.String("/"),
+	}
 
+	found := false
+	paginator := s3sdk.NewListObjectsV2Paginator(s3.Client, input)
+	for paginator.HasMorePages() {
+		result, err := paginator.NextPage(ctx)
+		if err != nil {
+			return ki, err
+		}
+		if len(result.Contents) > 0 || len(result.CommonPrefixes) > 0 {
+			found = true
+		}
+		for _, obj := range result.Contents {
+			if modified := aws.ToTime(obj.LastModified); modified.After(ki.Modified) {
+				ki.Modified = modified
+			}
+		}
+	}
+	if !found {
+		return certmagic.KeyInfo{}, fs.ErrNotExist
+	}
+
+	ki.Key = key
+	ki.IsTerminal = false
+	return ki, nil
+}
+
+// hasChildren reports whether any object lives under key, which makes key a
+// directory.
+func (s3 *S3) hasChildren(ctx context.Context, key string) (bool, error) {
 	input := &s3sdk.ListObjectsV2Input{
 		Bucket:  aws.String(s3.Bucket),
-		Prefix:  aws.String(prefix),
+		Prefix:  aws.String(s3.dirName(key)),
 		MaxKeys: aws.Int32(1),
 	}
 
 	result, err := s3.Client.ListObjectsV2(ctx, input)
 	if err != nil {
-		return ki, err
+		return false, err
 	}
-	if len(result.Contents) == 0 {
-		return ki, fs.ErrNotExist
-	}
+	return len(result.Contents) > 0, nil
+}
 
-	ki.Key = key
-	ki.Modified = aws.ToTime(result.Contents[0].LastModified)
-	ki.IsTerminal = false
-	return ki, nil
+// dirName is the prefix shared by every object under key.
+func (s3 *S3) dirName(key string) string {
+	return strings.TrimSuffix(s3.objName(key), "/") + "/"
 }
 
 func (s3 *S3) objName(key string) string {
