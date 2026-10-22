@@ -2,7 +2,7 @@
 
 Parking pages for communes that do not have a website yet.
 
-A JSON file lists the domains and six fields for each. A Python builder
+A JSON file lists the domains and six fields for each. A small Go builder
 turns every entry into one self-contained HTML page, and Caddy serves it over
 HTTPS.
 
@@ -43,7 +43,7 @@ restart, no config regeneration. Every redirect is temporary (302) on purpose �
 parking is a placeholder that owners are expected to replace with a real site,
 and a 301 would linger in browser caches long after that.
 
-The page is ~5.8 kB of HTML, ~1.6 kB over the wire, in a single request: no
+The page is ~4.2 kB of HTML, ~1.6 kB over the wire, in a single request: no
 fonts, no stylesheets, no scripts, no images. The favicon is an inline data
 URI.
 
@@ -66,7 +66,7 @@ builds and the server all run in them, against the same images that ship. There
 is no host toolchain to install, and none to drift out of step.
 
 ```sh
-make install      # builds the tooling image the other targets run in
+make install      # builds the images and pulls the Go image the other targets run in
 ```
 
 ## Running
@@ -121,7 +121,18 @@ which means a redirect from the apex lands you on `https://www.brigny.fr/`
 on 8443.
 
 To skip the server altogether and just look at the HTML, `make build` writes
-the pages to `./build`, owned by you rather than by root.
+the pages to `./build`, owned by you rather than by root. `make preview` builds
+them and serves that directory over HTTP, so a template change can be looked
+at in a browser:
+
+```sh
+make preview
+# http://localhost:8081/www.brigny.fr/index.html
+```
+
+The tree is served as it is written, hence the host in the path. This is the
+page and nothing else: no TLS, no redirect, no allowlist. `make run` is the
+whole stack.
 
 ## Configuration
 
@@ -132,10 +143,13 @@ Builder:
 | `DOMAINS_URL` | *(required)* | Location of the JSON file: `https://`, `s3://`, `file://` or a path |
 | `REBUILD_INTERVAL` | `300` | Seconds between refetches. `0` builds once and exits |
 | `OUTPUT_DIR` | `/srv/sites` | Root of the generated tree |
-| `LOG_LEVEL` | `INFO` | Python log level |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN` or `ERROR` |
 
 `s3://` URLs use the standard `AWS_*` variables; set `AWS_ENDPOINT_URL` to
-point at any S3-compatible store.
+point at any S3-compatible store, which is then addressed path-style.
+
+Pages are built in parallel, one worker per CPU. Go sizes that from the
+container's CPU limit; `GOMAXPROCS` overrides it.
 
 The first build must succeed or the builder exits. Afterwards a failed refetch
 is logged and the previous build keeps being served.
@@ -187,7 +201,8 @@ Upstream v1.5.0 fixes the bucket deletion during OCSP cleanup
 ([#21](https://github.com/techknowlogick/certmagic-s3/issues/21)) and the
 Caddyfile block that did not parse
 ([#19](https://github.com/techknowlogick/certmagic-s3/issues/19)). The vendored
-copy is that release plus four local changes. We build the code we read.
+copy is that release plus the local changes listed there. We build the code we
+read.
 
 ```sh
 make vendor-test      # gofmt + go vet + go test, in a container
@@ -196,6 +211,23 @@ make vendor-update    # go get -u && go mod tidy, then re-check
 
 The Caddy build fails if the module does not end up registered, so a broken
 vendor drop cannot ship silently.
+
+## Certificate cache
+
+Caddy keeps at most 10,000 certificates in memory by default and evicts at
+random beyond that, after which a handshake for an evicted certificate reloads
+it from S3. Every parked domain has two certificates, www and apex, so the
+estate is past that limit.
+
+The capacity can only be set in Caddy's JSON config, so Caddy runs the
+Caddyfile through a small config adapter, `caddy/adapter/`, which adapts it as
+usual and then sets the capacity to 100,000. A cached certificate takes a few
+kB, so a full cache is a few hundred MB; only the certificates requested since
+startup are loaded.
+
+```sh
+make test-adapter     # gofmt + go vet + go test, in a container
+```
 
 ## The domain list
 
@@ -237,13 +269,17 @@ stripped, so the two can never disagree. `siret` builds the *Présence
 numérique* link to `suiteterritoriale.anct.gouv.fr/bienvenue/<siret>`.
 
 Everything else — wording, labels, fixed URLs, colours, language — lives in
-`builder/templates/index.html.j2`, so a copy change never touches the schema.
+`builder/index.html.tmpl`, so a copy change never touches the schema. It is a
+Go `html/template`, so every value is escaped for where it lands. The builder
+minifies it once at startup, not every page. Its stylesheet only has its
+whitespace stripped: a CSS minifier also rewrites values to newer syntax, such
+as percentage alpha or range media queries, that older browsers drop.
 
 ## Development
 
 ```sh
-make lint         # ruff format + ruff check + pylint + caddy validate
-make test         # unit tests
+make lint         # gofmt + go vet + caddy validate
+make test         # the builder's unit tests
 make test-e2e     # brings the whole stack up against RustFS and asserts
                   # routing, the TLS allowlist and certificates landing in S3
 make vendor-test  # gofmt + go vet + go test on the vendored plugin

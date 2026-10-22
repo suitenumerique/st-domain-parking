@@ -287,6 +287,13 @@ func (s3 *S3) Exists(ctx context.Context, key string) bool {
 	_, err := s3.Client.HeadObject(ctx, input)
 	exists := err == nil
 
+	// LOCAL CHANGE: certmagic's Storage contract has Exists true for a key
+	// that is a directory too, as Stat reports one. S3 has no object for it,
+	// so look for objects under it. Only a missing key pays for the listing.
+	if isNotFound(err) {
+		exists, _ = s3.hasChildren(ctx, key)
+	}
+
 	s3.Logger.Debug("existence check completed",
 		zap.String("key", objName),
 		zap.Bool("exists", exists),
@@ -295,6 +302,22 @@ func (s3 *S3) Exists(ctx context.Context, key string) bool {
 	return exists
 }
 
+// List returns the keys under prefix.
+//
+// LOCAL CHANGE: certmagic's storage contract is hierarchical. List(prefix,
+// false) must return the immediate children of prefix, directories included,
+// so that callers can walk the tree one level at a time; List(prefix, true)
+// returns every descendant. The previous implementation ignored `recursive`
+// and always returned every descendant, which broke certmagic's storage
+// cleaning: it walked the returned keys as if they were directories, so it
+// issued one listing per returned key and never found the per-site assets it
+// looks for.
+//
+// S3 has no directories, but it emulates them: a listing with a "/" delimiter
+// returns the objects directly under the prefix and the shared prefixes of
+// its subdirectories, which is exactly the immediate-children semantics
+// certmagic expects. Directory keys come back without their trailing slash,
+// as they do in certmagic's own file storage.
 func (s3 *S3) List(ctx context.Context, prefix string, recursive bool) ([]string, error) {
 	var keys []string
 
@@ -305,6 +328,9 @@ func (s3 *S3) List(ctx context.Context, prefix string, recursive bool) ([]string
 	input := &s3sdk.ListObjectsV2Input{
 		Bucket: aws.String(s3.Bucket),
 		Prefix: aws.String(fullPrefix),
+	}
+	if !recursive {
+		input.Delimiter = aws.String("/")
 	}
 
 	paginator := s3sdk.NewListObjectsV2Paginator(s3.Client, input)
@@ -319,13 +345,29 @@ func (s3 *S3) List(ctx context.Context, prefix string, recursive bool) ([]string
 			// Strip the configured prefix from the key before appending
 			keys = append(keys, strings.TrimPrefix(key, s3.objName("")))
 		}
+
+		// The subdirectories of the prefix, as opposed to the files in it.
+		// Only a non-recursive listing produces them.
+		for _, common := range result.CommonPrefixes {
+			key := strings.TrimPrefix(aws.ToString(common.Prefix), s3.objName(""))
+			keys = append(keys, strings.TrimSuffix(key, "/"))
+		}
 	}
 
 	return keys, nil
 }
 
+// Stat reports what is known about a key.
+//
+// LOCAL CHANGE: S3 has no directories, so a key that is a prefix of other
+// keys has no object of its own. certmagic's own file storage reports those
+// keys as directories (KeyInfo.IsTerminal false) rather than as missing, and
+// certmagic's account discovery relies on that: it lists the account
+// folders, stats them, and keeps the ones that are not files. Without this,
+// every stat of a folder came back as fs.ErrNotExist and the account was
+// never found.
 func (s3 *S3) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error) {
-	s3.Logger.Info(fmt.Sprintf("Stat: %v", s3.objName(key)))
+	s3.Logger.Debug(fmt.Sprintf("Stat: %v", s3.objName(key)))
 	var ki certmagic.KeyInfo
 
 	input := &s3sdk.HeadObjectInput{
@@ -340,7 +382,7 @@ func (s3 *S3) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error) {
 		// SDK as *types.NotFound. Without isNotFound (lock.go), Stat on a
 		// missing key returned a generic error instead of fs.ErrNotExist.
 		if isNotFound(err) {
-			return ki, fs.ErrNotExist
+			return s3.statDirectory(ctx, key, ki)
 		}
 		return ki, err
 	}
@@ -350,6 +392,67 @@ func (s3 *S3) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error) {
 	ki.Modified = aws.ToTime(result.LastModified)
 	ki.IsTerminal = true
 	return ki, nil
+}
+
+// statDirectory reports a key that has no object of its own but is a prefix
+// of other keys as the directory it is.
+//
+// Its modification time is that of the newest object directly under it,
+// the closest S3 has to a directory mtime. certmagic sorts account folders
+// by it to pick the most recent account. That takes a full listing of the
+// directory's own level, which is fine for the folders certmagic stats: an
+// account folder holds two files.
+func (s3 *S3) statDirectory(ctx context.Context, key string, ki certmagic.KeyInfo) (certmagic.KeyInfo, error) {
+	input := &s3sdk.ListObjectsV2Input{
+		Bucket:    aws.String(s3.Bucket),
+		Prefix:    aws.String(s3.dirName(key)),
+		Delimiter: aws.String("/"),
+	}
+
+	found := false
+	paginator := s3sdk.NewListObjectsV2Paginator(s3.Client, input)
+	for paginator.HasMorePages() {
+		result, err := paginator.NextPage(ctx)
+		if err != nil {
+			return ki, err
+		}
+		if len(result.Contents) > 0 || len(result.CommonPrefixes) > 0 {
+			found = true
+		}
+		for _, obj := range result.Contents {
+			if modified := aws.ToTime(obj.LastModified); modified.After(ki.Modified) {
+				ki.Modified = modified
+			}
+		}
+	}
+	if !found {
+		return certmagic.KeyInfo{}, fs.ErrNotExist
+	}
+
+	ki.Key = key
+	ki.IsTerminal = false
+	return ki, nil
+}
+
+// hasChildren reports whether any object lives under key, which makes key a
+// directory.
+func (s3 *S3) hasChildren(ctx context.Context, key string) (bool, error) {
+	input := &s3sdk.ListObjectsV2Input{
+		Bucket:  aws.String(s3.Bucket),
+		Prefix:  aws.String(s3.dirName(key)),
+		MaxKeys: aws.Int32(1),
+	}
+
+	result, err := s3.Client.ListObjectsV2(ctx, input)
+	if err != nil {
+		return false, err
+	}
+	return len(result.Contents) > 0, nil
+}
+
+// dirName is the prefix shared by every object under key.
+func (s3 *S3) dirName(key string) string {
+	return strings.TrimSuffix(s3.objName(key), "/") + "/"
 }
 
 func (s3 *S3) objName(key string) string {

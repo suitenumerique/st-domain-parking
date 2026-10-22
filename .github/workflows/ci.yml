@@ -1,5 +1,5 @@
 # CI runs the same `make` targets a developer runs, and they all run in
-# containers. Nothing here installs a Python or Go toolchain on the runner: a
+# containers. Nothing here installs a Go toolchain on the runner: a
 # workflow that built its own environment would be testing an environment
 # nobody else has.
 
@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # ruff, pylint, and `caddy validate` against the real image.
+      # gofmt, go vet, and `caddy validate` against the real image.
       - name: Lint
         run: make lint-check
 
@@ -51,6 +51,16 @@ jobs:
       # refresher goroutine per held lock, several instances on one bucket.
       - name: Go tests
         run: make vendor-test
+
+  adapter:
+    name: Caddy config adapter
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Go tests
+        run: make test-adapter
 
   e2e:
     name: End-to-end

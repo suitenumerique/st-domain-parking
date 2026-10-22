@@ -8,8 +8,9 @@ local disk.
 - Licence: Apache 2.0 (see `LICENSE`)
 
 The build keeps the module path as `github.com/techknowlogick/certmagic-s3`.
-An xcaddy `--with …=<dir>` replacement substitutes this directory for it, so
-rebasing on upstream stays a plain diff.
+An xcaddy `--with …@<tag>=<dir>` replacement substitutes this directory for it, so
+rebasing on upstream stays a plain diff. `<tag>` is `CERTMAGIC_S3_VERSION` in
+`caddy/Dockerfile`: keep it equal to the fork tag above.
 
 ## Why vendored
 
@@ -105,14 +106,58 @@ Every one is marked `LOCAL CHANGE` in the source.
    the pinned SDK, so it stays hidden unless Caddy runs with the `debug`
    global option. SDK warnings still show.
 
+6. **`List()` returns the immediate children of a prefix.** certmagic's
+   storage contract is hierarchical: `List(prefix, false)` returns the
+   immediate children of the prefix, directories included, so that callers
+   can walk the tree one level at a time. Upstream ignores `recursive` and
+   always returns every descendant, which breaks certmagic's storage
+   cleaning: it treats the returned keys as directories, so it issues one
+   listing per returned key — a listing per certificate asset rather than
+   per certificate — and never finds the per-site assets it is looking for.
+   With an estate of tens of thousands of certificates that is hundreds of
+   thousands of listings per pass, and expired certificates are never
+   reclaimed. It also broke the account lookup by key, which lists the
+   users folder and takes each entry's base name as an account email.
+
+   S3 has no directories but emulates them: a listing with a `/` delimiter
+   returns the objects directly under the prefix and the shared prefixes of
+   its subdirectories, which is exactly the immediate-children semantics
+   certmagic expects. Directory keys come back without their trailing
+   slash, as they do in certmagic's own file storage. A recursive listing
+   is unchanged.
+
+7. **`Stat()` and `Exists()` report a directory as a directory.** S3 has no object for a
+   key that is only a prefix of other keys, so `Stat()` used to answer
+   `fs.ErrNotExist` for it. certmagic's own file storage answers
+   `KeyInfo.IsTerminal == false` instead, and certmagic's account
+   discovery relies on that: it lists the account folders, stats them, and
+   keeps the ones that are not files. `Stat()` now looks for objects under
+   the key and, finding any, reports the key as the directory it is. Its
+   modification time is that of the newest object directly under it, since
+   certmagic picks the most recent account by it.
+
+   `Exists()` agrees: certmagic's contract has it true for a directory too.
+   It lists the key's children only when there is no object at the key.
+
+8. **`Stat()` logs at debug level.** It logged one line per key at INFO.
+   certmagic's storage cleaning stats a key per certificate, so that is one
+   line per certificate on every pass. The line is a trace of one call, and
+   belongs at debug level.
+
 ### Local-only files
 
 - `VENDORED.md` — this file.
 - `local_test.go` — tests for behaviour upstream does not have:
   `TestValidateHost`, `TestStringHidesCredentials`,
-  `TestCleanupStopsRefreshing`, and `TestStatAndLoadReportNotExist`.
+  `TestCleanupStopsRefreshing`, `TestStatAndLoadReportNotExist`,
+  `TestListReturnsImmediateChildren`, `TestListCollectsDirectoriesAcrossPages`,
+  `TestStatReportsDirectory` and
+  `TestExistsReportsDirectory`.
 - `log_test.go` — tests the log-redaction change (`MarshalLogObject`) and the
   SDK log bridge (`sdkLogger`). Upstream has neither.
+- `fakes3_test.go` — the in-memory S3 used by the tests. It now also
+  answers `ListObjectsV2`, with the delimiter S3 uses to emulate
+  directories, so the listing behaviour can be tested without a store.
 
 ### Omitted upstream files
 
@@ -128,9 +173,6 @@ semicolon that upstream still carries in `UnmarshalCaddyfile`.
   `storage s3 {`, which has no argument of its own. Turning the skip into an
   error reproduces upstream issue #19. The code carries a comment that
   explains this.
-- **`List()` ignores its `recursive` argument.** It always lists everything
-  under the prefix. This matches how certmagic calls `List()`. This note
-  exists because the behaviour does not match what the signature promises.
 
 ## Updating
 

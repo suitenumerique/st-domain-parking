@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -134,5 +136,179 @@ func TestStatAndLoadReportNotExist(t *testing.T) {
 	}
 	if _, err := s.Load(context.Background(), "missing"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Load on a missing key: got %v, want fs.ErrNotExist", err)
+	}
+}
+
+// certmagic walks its storage level by level: a listing of a prefix returns
+// the immediate children of that prefix, directories included, so that the
+// caller can then list each of them in turn. Listing everything under the
+// prefix instead makes the caller treat every file as a directory, which
+// costs one listing per file and finds nothing.
+func TestListReturnsImmediateChildren(t *testing.T) {
+	// With and without a storage prefix, which every returned key, directory
+	// or file, has to be stripped of.
+	for _, storagePrefix := range []string{"", "caddy"} {
+		t.Run("prefix="+storagePrefix, func(t *testing.T) {
+			testListReturnsImmediateChildren(t, storagePrefix)
+		})
+	}
+}
+
+func testListReturnsImmediateChildren(t *testing.T, storagePrefix string) {
+	f, srv := newFakeS3(t)
+	s := f.instance(srv)
+	s.Prefix = storagePrefix
+
+	seeded := []string{
+		"certificates/issuer/site-a/site-a.crt",
+		"certificates/issuer/site-a/site-a.key",
+		"certificates/issuer/site-a/site-a.json",
+		"certificates/issuer/site-b/site-b.crt",
+		"ocsp/site-a-abcdef",
+	}
+	for _, key := range seeded {
+		f.seed(s.objName(key), time.Now())
+	}
+
+	tests := []struct {
+		name      string
+		prefix    string
+		recursive bool
+		want      []string
+	}{
+		{
+			name:   "a prefix returns its directories",
+			prefix: "certificates",
+			want:   []string{"certificates/issuer"},
+		},
+		{
+			name:   "a directory returns the directories in it",
+			prefix: "certificates/issuer",
+			want:   []string{"certificates/issuer/site-a", "certificates/issuer/site-b"},
+		},
+		{
+			name:   "a site returns its files",
+			prefix: "certificates/issuer/site-a",
+			want: []string{
+				"certificates/issuer/site-a/site-a.crt",
+				"certificates/issuer/site-a/site-a.json",
+				"certificates/issuer/site-a/site-a.key",
+			},
+		},
+		{
+			name:      "a recursive listing returns every descendant",
+			prefix:    "certificates",
+			recursive: true,
+			want: []string{
+				"certificates/issuer/site-a/site-a.crt",
+				"certificates/issuer/site-a/site-a.json",
+				"certificates/issuer/site-a/site-a.key",
+				"certificates/issuer/site-b/site-b.crt",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := s.List(context.Background(), tt.prefix, tt.recursive)
+			if err != nil {
+				t.Fatalf("List(%q, %t): %v", tt.prefix, tt.recursive, err)
+			}
+			sort.Strings(got)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("List(%q, %t) = %v, want %v", tt.prefix, tt.recursive, got, tt.want)
+			}
+		})
+	}
+}
+
+// An issuer directory holds one directory per host, far more than the 1,000
+// entries of one S3 page, and nothing else.
+func TestListCollectsDirectoriesAcrossPages(t *testing.T) {
+	f, srv := newFakeS3(t)
+	s := f.instance(srv)
+
+	var want []string
+	for i := range 2500 {
+		site := fmt.Sprintf("certificates/issuer/site-%04d", i)
+		f.seed(site+"/site.crt", time.Now())
+		want = append(want, site)
+	}
+
+	got, err := s.List(context.Background(), "certificates/issuer", false)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("List returned %d directories, want %d", len(got), len(want))
+	}
+}
+
+// A key that is a prefix of other keys is a directory, and S3 has no object
+// for it. certmagic's account discovery lists the account folders and stats
+// them, keeping the ones that are not files, so a folder that reports itself
+// as missing is never found.
+func TestStatReportsDirectory(t *testing.T) {
+	f, srv := newFakeS3(t)
+	s := f.instance(srv)
+
+	older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+	// Seeded so that the newer object does not come first in a listing.
+	f.seed("acme/ca/users/admin/admin.json", older)
+	f.seed("acme/ca/users/admin/admin.key", newer)
+
+	info, err := s.Stat(context.Background(), "acme/ca/users/admin")
+	if err != nil {
+		t.Fatalf("Stat on a directory: %v", err)
+	}
+	if info.IsTerminal {
+		t.Error("Stat on a directory reported a file")
+	}
+	// certmagic picks the most recent account by this time.
+	if !info.Modified.Equal(newer) {
+		t.Errorf("Stat on a directory: modified %v, want the newest object's %v", info.Modified, newer)
+	}
+
+	// A directory holding only directories is still a directory.
+	info, err = s.Stat(context.Background(), "acme/ca")
+	if err != nil {
+		t.Fatalf("Stat on a directory of directories: %v", err)
+	}
+	if info.IsTerminal {
+		t.Error("Stat on a directory of directories reported a file")
+	}
+
+	info, err = s.Stat(context.Background(), "acme/ca/users/admin/admin.key")
+	if err != nil {
+		t.Fatalf("Stat on a file: %v", err)
+	}
+	if !info.IsTerminal {
+		t.Error("Stat on a file reported a directory")
+	}
+
+	if _, err := s.Stat(context.Background(), "acme/ca/users/nobody"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat on a missing key: got %v, want fs.ErrNotExist", err)
+	}
+}
+
+// certmagic's Storage contract has Exists true for a directory as well as a
+// file, in agreement with Stat.
+func TestExistsReportsDirectory(t *testing.T) {
+	f, srv := newFakeS3(t)
+	s := f.instance(srv)
+
+	f.seed("acme/ca/users/admin/admin.key", time.Now())
+
+	for key, want := range map[string]bool{
+		"acme/ca/users/admin/admin.key": true,
+		"acme/ca/users/admin":           true,
+		"acme/ca/users/adm":             false,
+		"acme/ca/users/nobody":          false,
+	} {
+		if got := s.Exists(context.Background(), key); got != want {
+			t.Errorf("Exists(%q) = %t, want %t", key, got, want)
+		}
 	}
 }

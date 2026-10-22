@@ -11,7 +11,7 @@
 services:
   builder:
     build:
-      context: .
+      context: ./builder
       target: builder
     restart: unless-stopped
     environment:
@@ -29,35 +29,16 @@ services:
       # Only needed for the file:// default above.
       - ./domains.example.json:/domains/domains.json:ro
 
-  # Development tooling: the same dependencies as the builder, on Debian with a
-  # shell and the dev extras. Every Makefile target that runs Python — the
-  # tests, the linters, a local page build — goes through this. There is no
-  # host toolchain to install and none to drift.
-  #
-  # Behind a profile so `docker compose up` ignores it; `run` enables it.
-  builder-dev:
-    build:
-      context: .
-      target: runtime-dev
-    profiles: [tools]
-    # Files land in the working tree, so they have to belong to whoever ran make.
-    user: ${DOCKER_USER:-1000:1000}
-    environment:
-      # ruff, pylint and pytest all want somewhere to cache.
-      HOME: /tmp
-      PYTHONDONTWRITEBYTECODE: 1
-    volumes:
-      - .:/app
-
-  # Creates the certificate bucket in RustFS, then exits. Development only —
-  # a real deployment provisions its bucket out of band.
+  # Creates the certificate bucket in RustFS, then exits. Development only:
+  # a real deployment provisions its bucket out of band. The end-to-end test
+  # also runs it to look inside the bucket.
   bucket-init:
     build:
-      context: .
-      target: builder
+      context: ./builder
+      target: s3dev
     depends_on:
       - rustfs
-    entrypoint: ["python", "/scripts/ensure_bucket.py"]
+    command: ["ensure-bucket"]
     restart: "no"
     environment:
       S3_BUCKET: ${S3_BUCKET:-caddy-certs}
@@ -65,8 +46,6 @@ services:
       S3_ENDPOINT: ${S3_ENDPOINT:-http://rustfs:9000}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
       S3_SECRET_KEY: ${S3_SECRET_KEY:-rustfsadmin}
-    volumes:
-      - ./scripts:/scripts:ro
 
   caddy:
     build:
@@ -104,7 +83,7 @@ services:
 
   # S3-compatible store, for local development and the end-to-end test only.
   rustfs:
-    image: rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    image: rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
     restart: unless-stopped
     environment:
       RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
