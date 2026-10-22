@@ -50,7 +50,7 @@ var patterns = []struct {
 	{"domain", regexp.MustCompile(`^` + label + `(?:\.` + label + `)+$`), "a domain name"},
 	{"commune_name", regexp.MustCompile(`^[^\x00-\x1f]{1,100}$`), "a commune name"},
 	{"commune_zipcode", regexp.MustCompile(`^[0-9]{5}$`), "5 digits"},
-	{"email", regexp.MustCompile(`^[^@\s<>"']+@[^@\s<>"']+\.[a-z]{2,}$`), "an email address"},
+	{"email", regexp.MustCompile(`^[^@\s<>"']+@[^@\s<>"']+\.[a-zA-Z]{2,}$`), "an email address"},
 	{"siret", regexp.MustCompile(`^[0-9]{14}$`), "14 digits"},
 	{
 		"service_public_url",
@@ -65,7 +65,9 @@ var patterns = []struct {
 // rather than just that entry.
 const maxDomain = 253
 
-const httpTimeout = 30 * time.Second
+// fetchTimeout bounds a whole fetch: a stalled one would block the refresh
+// loop, and with it SIGHUP and SIGTERM.
+var fetchTimeout = 30 * time.Second
 
 // Site is one parked domain. Every field comes straight from the domain list.
 type Site struct {
@@ -134,7 +136,7 @@ func load(ctx context.Context, rawURL string) ([]Site, error) {
 			return nil, err
 		}
 		if seen[site.Domain] {
-			return nil, errors.New("the same domain is listed more than once")
+			return nil, fmt.Errorf("domains[%d]: %s is listed more than once", index, site.Domain)
 		}
 		seen[site.Domain] = true
 		sites = append(sites, site)
@@ -206,6 +208,9 @@ func fetch(ctx context.Context, rawURL string) ([]byte, error) {
 		return nil, fmt.Errorf("could not fetch %s: %w", rawURL, err)
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	defer cancel()
+
 	var body []byte
 	switch parsed.Scheme {
 	case "http", "https":
@@ -226,9 +231,6 @@ func fetch(ctx context.Context, rawURL string) ([]byte, error) {
 }
 
 func fetchHTTP(ctx context.Context, rawURL string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, httpTimeout)
-	defer cancel()
-
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err

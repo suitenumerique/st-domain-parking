@@ -222,6 +222,29 @@ func testListReturnsImmediateChildren(t *testing.T, storagePrefix string) {
 	}
 }
 
+// An issuer directory holds one directory per host, far more than the 1,000
+// entries of one S3 page, and nothing else.
+func TestListCollectsDirectoriesAcrossPages(t *testing.T) {
+	f, srv := newFakeS3(t)
+	s := f.instance(srv)
+
+	var want []string
+	for i := range 2500 {
+		site := fmt.Sprintf("certificates/issuer/site-%04d", i)
+		f.seed(site+"/site.crt", time.Now())
+		want = append(want, site)
+	}
+
+	got, err := s.List(context.Background(), "certificates/issuer", false)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("List returned %d directories, want %d", len(got), len(want))
+	}
+}
+
 // A key that is a prefix of other keys is a directory, and S3 has no object
 // for it. certmagic's account discovery lists the account folders and stats
 // them, keeping the ones that are not files, so a folder that reports itself

@@ -159,7 +159,9 @@ func writeError(w http.ResponseWriter, status int, code string) {
 
 // list implements ListObjectsV2, including the delimiter S3 uses to emulate
 // directories: with a delimiter, the keys that share a prefix up to the next
-// delimiter come back as common prefixes rather than as contents.
+// delimiter come back as common prefixes rather than as contents. As in S3,
+// each common prefix counts once against max-keys, and pages run through
+// contents and common prefixes together, in key order.
 func (f *fakeS3) list(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	prefix := query.Get("prefix")
@@ -181,31 +183,46 @@ func (f *fakeS3) list(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(keys)
 
-	var contents []string
-	commonPrefixes := make(map[string]struct{})
+	// Every entry of the listing, keyed by what it returns: the key itself
+	// for contents, the shared prefix for common prefixes.
+	entries := make(map[string]bool) // true for a common prefix
 	for _, key := range keys {
 		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
-		if after != "" && key <= after {
-			continue
-		}
+		entry, isPrefix := key, false
 		if delimiter != "" {
 			rest := strings.TrimPrefix(key, prefix)
 			if i := strings.Index(rest, delimiter); i >= 0 {
-				commonPrefixes[prefix+rest[:i+len(delimiter)]] = struct{}{}
-				continue
+				entry, isPrefix = prefix+rest[:i+len(delimiter)], true
 			}
 		}
-		contents = append(contents, key)
+		if after != "" && entry <= after {
+			continue
+		}
+		entries[entry] = isPrefix
 	}
+	ordered := make([]string, 0, len(entries))
+	for entry := range entries {
+		ordered = append(ordered, entry)
+	}
+	sort.Strings(ordered)
 
 	truncated := false
 	var nextToken string
-	if len(contents) > maxKeys {
-		contents = contents[:maxKeys]
+	if len(ordered) > maxKeys {
+		ordered = ordered[:maxKeys]
 		truncated = true
-		nextToken = contents[len(contents)-1]
+		nextToken = ordered[len(ordered)-1]
+	}
+
+	var contents, prefixes []string
+	for _, entry := range ordered {
+		if entries[entry] {
+			prefixes = append(prefixes, entry)
+		} else {
+			contents = append(contents, entry)
+		}
 	}
 
 	var body strings.Builder
@@ -213,7 +230,7 @@ func (f *fakeS3) list(w http.ResponseWriter, r *http.Request) {
 	body.WriteString(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`)
 	body.WriteString(`<Name>test</Name>`)
 	fmt.Fprintf(&body, `<Prefix>%s</Prefix>`, prefix)
-	fmt.Fprintf(&body, `<KeyCount>%d</KeyCount>`, len(contents)+len(commonPrefixes))
+	fmt.Fprintf(&body, `<KeyCount>%d</KeyCount>`, len(ordered))
 	fmt.Fprintf(&body, `<MaxKeys>%d</MaxKeys>`, maxKeys)
 	fmt.Fprintf(&body, `<IsTruncated>%t</IsTruncated>`, truncated)
 	if truncated {
@@ -228,11 +245,6 @@ func (f *fakeS3) list(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&body, `<Size>%d</Size>`, len(obj.body))
 		body.WriteString(`</Contents>`)
 	}
-	prefixes := make([]string, 0, len(commonPrefixes))
-	for key := range commonPrefixes {
-		prefixes = append(prefixes, key)
-	}
-	sort.Strings(prefixes)
 	for _, key := range prefixes {
 		fmt.Fprintf(&body, `<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>`, key)
 	}

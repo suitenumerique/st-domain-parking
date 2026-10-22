@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func valid() map[string]any {
@@ -112,7 +113,15 @@ func TestTheWWWPrefixIsStrippedAndTheDomainNormalised(t *testing.T) {
 }
 
 func TestADomainListedTwiceIsRejected(t *testing.T) {
-	loadFails(t, write(t, []any{valid(), with(map[string]any{"domain": "www.brigny.fr"})}), "more than once")
+	loadFails(t, write(t, []any{valid(), with(map[string]any{"domain": "www.brigny.fr"})}), "domains[1]: brigny.fr is listed more than once")
+}
+
+func TestAnUppercaseEmailDomainIsAccepted(t *testing.T) {
+	sites := mustLoad(t, write(t, []any{with(map[string]any{"email": "Contact@Mairie-Brigny.FR"})}))
+
+	if sites[0].Email != "Contact@Mairie-Brigny.FR" {
+		t.Errorf("got %q", sites[0].Email)
+	}
 }
 
 func TestEveryFieldIsMandatory(t *testing.T) {
@@ -225,7 +234,18 @@ func TestAnS3URLIsRead(t *testing.T) {
 		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
+	useS3Endpoint(t, srv)
 
+	if sites := mustLoad(t, "s3://lists/prod/domains.json"); sites[0].Domain != "brigny.fr" {
+		t.Errorf("got %+v", sites)
+	}
+	loadFails(t, "s3://lists/prod/missing.json", "could not fetch")
+}
+
+// useS3Endpoint points s3:// URLs at srv, isolated from any AWS
+// configuration on the machine.
+func useS3Endpoint(t *testing.T, srv *httptest.Server) {
+	t.Helper()
 	t.Setenv("AWS_ENDPOINT_URL", strings.Replace(srv.URL, "127.0.0.1", "localhost", 1))
 	t.Setenv("AWS_ACCESS_KEY_ID", "id")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
@@ -233,11 +253,42 @@ func TestAnS3URLIsRead(t *testing.T) {
 	t.Setenv("AWS_DEFAULT_REGION", "")
 	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "none"))
 	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "none"))
+}
 
-	if sites := mustLoad(t, "s3://lists/prod/domains.json"); sites[0].Domain != "brigny.fr" {
-		t.Errorf("got %+v", sites)
+// A source that stops sending mid-body must not block the refresh loop.
+func TestAStalledFetchTimesOut(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		_, _ = w.Write([]byte("["))
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+	useS3Endpoint(t, srv)
+
+	previous := fetchTimeout
+	fetchTimeout = 200 * time.Millisecond
+	defer func() { fetchTimeout = previous }()
+
+	for _, url := range []string{srv.URL + "/domains.json", "s3://lists/prod/domains.json"} {
+		t.Run(url, func(t *testing.T) {
+			done := make(chan error, 1)
+			go func() {
+				_, err := load(context.Background(), url)
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), "could not fetch") {
+					t.Errorf("load: got %v, want a fetch error", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("load did not time out")
+			}
+		})
 	}
-	loadFails(t, "s3://lists/prod/missing.json", "could not fetch")
 }
 
 func TestAnUnsupportedSchemeIsReported(t *testing.T) {

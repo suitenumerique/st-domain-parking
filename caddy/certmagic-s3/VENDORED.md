@@ -149,7 +149,8 @@ Every one is marked `LOCAL CHANGE` in the source.
 - `local_test.go` — tests for behaviour upstream does not have:
   `TestValidateHost`, `TestStringHidesCredentials`,
   `TestCleanupStopsRefreshing`, `TestStatAndLoadReportNotExist`,
-  `TestListReturnsImmediateChildren`, `TestStatReportsDirectory` and
+  `TestListReturnsImmediateChildren`, `TestListCollectsDirectoriesAcrossPages`,
+  `TestStatReportsDirectory` and
   `TestExistsReportsDirectory`.
 - `log_test.go` — tests the log-redaction change (`MarshalLogObject`) and the
   SDK log bridge (`sdkLogger`). Upstream has neither.
