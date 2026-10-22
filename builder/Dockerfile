@@ -2,7 +2,7 @@
 # separate image, built from caddy/.
 #
 # The `s3dev` target is the S3 client for local development and the
-# end-to-end test (see builder/cmd/s3dev). It is not in the builder image.
+# end-to-end test (see cmd/s3dev). It is not in the builder image.
 
 # Digests resolved on 2026-10-21. GO_IMAGE is also pinned in the Makefile.
 ARG GO_IMAGE=golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc
@@ -11,10 +11,10 @@ ARG DISTROLESS_STATIC_IMAGE=gcr.io/distroless/static-debian13:nonroot@sha256:d62
 FROM ${GO_IMAGE} AS build
 
 WORKDIR /src
-COPY builder/go.mod builder/go.sum ./
+COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
-COPY builder/ ./
+COPY . ./
 # CGO stays off: the binaries have to run on distroless static.
 ENV CGO_ENABLED=0
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \

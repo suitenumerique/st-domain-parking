@@ -12,14 +12,14 @@ Re-fetch every value at run time. Do not trust a version written in a doc.
 | What | File | Latest value |
 | --- | --- | --- |
 | `actions/checkout` SHA + `# vX.Y.Z` comment | `.github/workflows/ci.yml`, every `uses:` | `https://api.github.com/repos/actions/checkout/git/ref/tags/<tag>` (dereference an annotated tag through `git/tags/<sha>`) |
-| Debian and distroless bases | `Dockerfile` and `caddy/Dockerfile`, the `ARG *_IMAGE=` lines | registry digests (see below) |
+| Debian and distroless bases | `builder/Dockerfile` and `caddy/Dockerfile`, the `ARG *_IMAGE=` lines | registry digests (see below) |
 | Caddy version and builder digest | `caddy/Dockerfile`, `ARG CADDY_VERSION`, `ARG CADDY_BUILDER_DIGEST` | GitHub releases of `caddyserver/caddy`; digest from Docker Hub |
 | RustFS image | `compose.yaml`, `image: rustfs/rustfs:` | GitHub releases of `rustfs/rustfs`; digest from Docker Hub |
-| Go image | `Makefile` `GO_IMAGE`, the root `Dockerfile` `ARG GO_IMAGE`, and the two `TESTING.md` examples | the `GOLANG_VERSION` env in the Caddy builder image config; digest from Docker Hub |
+| Go image | `Makefile` `GO_IMAGE`, `builder/Dockerfile` `ARG GO_IMAGE`, and the two `TESTING.md` examples | the `GOLANG_VERSION` env in the Caddy builder image config; digest from Docker Hub |
 | Builder module | `builder/go.mod`, the `go` directive and every require | `go get -u ./... && go mod tidy` in the Go image; the `go` directive follows the Caddy builder's Go |
 | Vendored module | `caddy/certmagic-s3/go.mod`, the `go` directive and the direct requires | `https://proxy.golang.org/<module>/@latest`; the `go` directive follows the Caddy builder's Go |
 | Config adapter module | `caddy/adapter/go.mod`, the `go` directive and the `caddy/v2` require | the `caddy/v2` require follows `CADDY_VERSION`, then `go mod tidy`; the `go` directive follows the Caddy builder's Go |
-| certmagic-s3 fork point | `caddy/certmagic-s3/VENDORED.md`, "Forked at" | `git ls-remote --tags https://github.com/techknowlogick/certmagic-s3` |
+| certmagic-s3 fork point | `caddy/certmagic-s3/VENDORED.md`, "Forked at", and `caddy/Dockerfile` `ARG CERTMAGIC_S3_VERSION` | `git ls-remote --tags https://github.com/techknowlogick/certmagic-s3` |
 
 Image digest: `HEAD /v2/<repo>/manifests/<tag>` on the registry with
 `Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json`,

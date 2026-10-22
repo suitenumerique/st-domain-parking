@@ -11,7 +11,7 @@
 services:
   builder:
     build:
-      context: .
+      context: ./builder
       target: builder
     restart: unless-stopped
     environment:
@@ -34,7 +34,7 @@ services:
   # also runs it to look inside the bucket.
   bucket-init:
     build:
-      context: .
+      context: ./builder
       target: s3dev
     depends_on:
       - rustfs

@@ -1,3 +1,0 @@
-# The root image is built from builder/ alone. caddy/ is its own context.
-*
-!builder/

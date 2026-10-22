@@ -6,6 +6,9 @@
 # certmagic-s3/VENDORED.md for the local changes on top of upstream.
 
 ARG CADDY_VERSION=2.11.7
+# The upstream tag certmagic-s3/ is forked from (VENDORED.md, "Forked at").
+# Only the version recorded in the binary: the code is the local directory.
+ARG CERTMAGIC_S3_VERSION=v1.5.0
 
 # Digests resolved on 2026-10-21.
 ARG CADDY_BUILDER_DIGEST=sha256:8910fe662f448b860e8d16ef1c9a4f8946d3193bdc3e971bf0c55c9a2cf246f6
@@ -14,18 +17,21 @@ ARG DISTROLESS_STATIC_IMAGE=gcr.io/distroless/static-debian13:nonroot@sha256:d62
 
 # ---- Build Caddy with the storage plugin ----
 FROM caddy:${CADDY_VERSION}-builder@${CADDY_BUILDER_DIGEST} AS build
+ARG CERTMAGIC_S3_VERSION
 
 WORKDIR /src
 COPY certmagic-s3/ ./certmagic-s3/
 COPY adapter/ ./adapter/
 
 # `--with <module>=<dir>` rewrites the import to this directory, so what ships
-# is what is in the repo. CGO stays off: the result has to run on distroless.
+# is what is in the repo. Without `@<version>`, xcaddy's `go get` would record
+# whatever upstream's latest tag is at build time, and scanners match CVEs on
+# that. CGO stays off: the result has to run on distroless.
 ENV CGO_ENABLED=0
 # The builder image exports CADDY_VERSION=v<version>, which xcaddy reads by default.
 RUN xcaddy build \
     --output /out/caddy \
-    --with github.com/techknowlogick/certmagic-s3=/src/certmagic-s3 \
+    --with github.com/techknowlogick/certmagic-s3@${CERTMAGIC_S3_VERSION}=/src/certmagic-s3 \
     --with github.com/suitenumerique/st-domain-parking/caddy/adapter=/src/adapter
 
 # Fail the build rather than the deployment if a module did not make it in.

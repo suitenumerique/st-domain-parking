@@ -28,7 +28,7 @@ COMPOSE_RUN         = $(COMPOSE) run --rm --build
 # -- Go
 # Every Go command runs in this image: Docker is the only supported way to
 # work on this repo, so there is no host toolchain to keep in step. Also
-# pinned in the root Dockerfile.
+# pinned in builder/Dockerfile.
 GO_IMAGE            = golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc
 # Runs as whoever ran make, so files it writes in the tree belong to them.
 GO_RUN              = docker run --rm -u $(DOCKER_USER) -e HOME=/tmp -e GOCACHE=/tmp/go-build \

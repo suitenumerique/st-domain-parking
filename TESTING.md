@@ -63,8 +63,8 @@ docker run --rm -v "$PWD/caddy/certmagic-s3":/src -w /src \
   go test -race -count=50 -run TestLockIsExclusiveAcrossInstances ./...
 ```
 
-Keep this image the same as `GO_IMAGE` in the Makefile and the root
-`Dockerfile`.
+Keep this image the same as `GO_IMAGE` in the Makefile and
+`builder/Dockerfile`.
 
 ## Tier 3 — before deploying (~13 s warm)
 
