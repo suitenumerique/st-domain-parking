@@ -54,6 +54,10 @@
 		# when set; empty leaves them in clear text.
 		encryption_key "{$S3_ENCRYPTION_KEY}"
 	}
+	# Each pass reads every stored certificate, to delete the ones expired
+	# for two weeks. Caddy's default is daily. The last pass is recorded in
+	# the bucket, so restarts do not make it run more often.
+	storage_clean_interval {$STORAGE_CLEAN_INTERVAL:7d}
 
 	# Certificates are issued lazily, but only for parked and helpcenter
 	# hosts, and only once their DNS points at PUBLIC_IPS (see permission/).
@@ -108,6 +112,13 @@
 http:// {
 	import common
 
+	# Straight to the page, rather than through the apex over HTTPS, which
+	# costs a TLS handshake only to redirect again.
+	@parkedapex {
+		file /{host}/.parked
+		expression !{host}.startsWith("www.")
+	}
+
 	route {
 		respond @notget 405
 
@@ -118,6 +129,7 @@ http:// {
 		}
 
 		redir @helpcenter {env.HELPCENTER_REDIRECT_TARGET} 302
+		redir @parkedapex https://www.{host}/ 302
 		redir @parked https://{host}{uri} 302
 		respond 404
 	}

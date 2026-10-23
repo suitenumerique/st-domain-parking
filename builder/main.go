@@ -55,6 +55,11 @@ func run(args []string) int {
 		slog.Error(err.Error())
 		return 2
 	}
+	maxUnpark, err := maxUnparkPercent()
+	if err != nil {
+		slog.Error(err.Error())
+		return 2
+	}
 
 	// Before the first build, not after it: SIGHUP kills a process that is
 	// not handling it, so any window where it is unhandled is a window where
@@ -68,7 +73,7 @@ func run(args []string) int {
 
 	// The first build has to succeed: an empty tree would 404 every parked
 	// domain and, worse, teach Caddy's TLS allowlist that none of them exist.
-	if !rebuild(url, outputDir) {
+	if !rebuild(url, outputDir, maxUnpark) {
 		slog.Error("Initial build failed")
 		return 1
 	}
@@ -97,7 +102,7 @@ func run(args []string) int {
 		case <-timer.C:
 		}
 
-		rebuild(url, outputDir)
+		rebuild(url, outputDir, maxUnpark)
 		timer.Reset(interval)
 	}
 }
@@ -106,10 +111,10 @@ func run(args []string) int {
 //
 // A failed refresh is not fatal: whatever was built last is still on disk and
 // Caddy keeps serving it.
-func rebuild(url, outputDir string) bool {
+func rebuild(url, outputDir string, maxUnpark int) bool {
 	sites, err := load(context.Background(), url)
 	if err == nil {
-		err = build(sites, outputDir)
+		err = build(sites, outputDir, maxUnpark)
 	}
 	if err != nil {
 		slog.Error("Build skipped: " + err.Error())
@@ -145,6 +150,21 @@ func rebuildInterval() (time.Duration, error) {
 		return 0, fmt.Errorf("REBUILD_INTERVAL must be a number of seconds, got %q", raw)
 	}
 	return time.Duration(seconds) * time.Second, nil
+}
+
+// maxUnparkPercent reads MAX_UNPARK_PERCENT: the share of the parked hosts
+// one build may unpark. 100 turns the check off.
+func maxUnparkPercent() (int, error) {
+	raw := strings.TrimSpace(os.Getenv("MAX_UNPARK_PERCENT"))
+	if raw == "" {
+		raw = "10"
+	}
+
+	percent, err := strconv.Atoi(raw)
+	if err != nil || percent < 0 || percent > 100 {
+		return 0, fmt.Errorf("MAX_UNPARK_PERCENT must be a number from 0 to 100, got %q", raw)
+	}
+	return percent, nil
 }
 
 func setupLogging() error {

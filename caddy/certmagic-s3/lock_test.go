@@ -15,10 +15,15 @@ import (
 
 // newUnreachableS3 returns an S3 whose client fails every call with a
 // non-NoSuchKey error (connection refused), exercising Lock's retry path.
+//
+// LOCAL CHANGE: the SDK's own retries are off. Its jittered backoff made a
+// single failing call take up to several seconds, so the timing tests below
+// were measuring the SDK rather than Lock, and flaked against their bounds.
 func newUnreachableS3() *S3 {
 	client := s3sdk.New(s3sdk.Options{
 		BaseEndpoint: aws.String("http://127.0.0.1:1"),
 		Region:       "us-east-1",
+		Retryer:      aws.NopRetryer{},
 	})
 	return &S3{Logger: zap.NewNop(), Client: client, Bucket: "test"}
 }

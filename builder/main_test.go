@@ -238,6 +238,27 @@ func TestAnEmptyDomainListDoesNotUnparkEverything(t *testing.T) {
 	b.waitForBuilds(2)
 }
 
+// The same failure, short of empty: one domain of two left is past the
+// default MAX_UNPARK_PERCENT.
+func TestAShrunkDomainListDoesNotUnpark(t *testing.T) {
+	b := start(t, never)
+	b.waitForBuilds(1)
+	b.write(`[` + entryJSON("brigny.fr") + `,` + entryJSON("sainte-anne-sur-vilaine.fr") + `]`)
+	b.signal(syscall.SIGHUP)
+	b.waitForBuilds(2)
+
+	b.write(`[` + entryJSON("brigny.fr") + `]`)
+	b.signal(syscall.SIGHUP)
+
+	time.Sleep(500 * time.Millisecond)
+	if !exists(filepath.Join(b.output, "www.sainte-anne-sur-vilaine.fr", marker)) {
+		t.Error("a shrunk feed unparked the domain")
+	}
+	if !strings.Contains(b.log.String(), "MAX_UNPARK_PERCENT") {
+		t.Errorf("the refusal was not logged\n%s", b.log)
+	}
+}
+
 func TestSIGTERMStopsItPromptly(t *testing.T) {
 	for _, sig := range []os.Signal{syscall.SIGTERM, os.Interrupt} {
 		t.Run(sig.String(), func(t *testing.T) {
@@ -300,6 +321,8 @@ func TestConfigurationErrorsExitWith2(t *testing.T) {
 		{"bad interval", map[string]string{"REBUILD_INTERVAL": "soon"}, nil, "REBUILD_INTERVAL must be"},
 		{"negative interval", map[string]string{"REBUILD_INTERVAL": "-1"}, nil, "REBUILD_INTERVAL must be"},
 		{"bad log level", map[string]string{"LOG_LEVEL": "LOUD"}, nil, "LOG_LEVEL must be"},
+		{"bad unpark share", map[string]string{"MAX_UNPARK_PERCENT": "half"}, nil, "MAX_UNPARK_PERCENT must be"},
+		{"unpark share over 100", map[string]string{"MAX_UNPARK_PERCENT": "101"}, nil, "MAX_UNPARK_PERCENT must be"},
 		{"unknown command", nil, []string{"serve"}, "the only command is `hosts`"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

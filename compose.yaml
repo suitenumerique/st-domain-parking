@@ -17,6 +17,9 @@ services:
     environment:
       DOMAINS_URL: ${DOMAINS_URL:-file:///domains/domains.json}
       REBUILD_INTERVAL: ${REBUILD_INTERVAL:-300}
+      # A list that would unpark more than this share of the parked hosts is
+      # refused. Raise it for a deliberate large removal; 100 turns it off.
+      MAX_UNPARK_PERCENT: ${MAX_UNPARK_PERCENT:-10}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Credentials for s3:// domain lists. Set AWS_ENDPOINT_URL for any
       # S3-compatible store.
@@ -28,6 +31,12 @@ services:
       - sites:/srv/sites
       # Only needed for the file:// default above.
       - ./domains.example.json:/domains/domains.json:ro
+    # It parses remote input, so the same lockdown as Caddy: it only writes
+    # to the sites volume.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
 
   # Creates the certificate bucket in RustFS, then exits. Development only:
   # a real deployment provisions its bucket out of band. The end-to-end test
@@ -72,6 +81,11 @@ services:
       # No certificate is ordered for a host with any record elsewhere. Empty
       # skips the check: set it in production.
       PUBLIC_IPS: ${PUBLIC_IPS:-}
+      # Certificates kept in memory. Keep it above twice the domain count,
+      # or handshakes start reloading certificates from S3.
+      CERT_CACHE_CAPACITY: ${CERT_CACHE_CAPACITY:-100000}
+      # How often the bucket is swept for expired certificates.
+      STORAGE_CLEAN_INTERVAL: ${STORAGE_CLEAN_INTERVAL:-7d}
       # Certificate storage. Empty S3_ENDPOINT means real AWS.
       S3_BUCKET: ${S3_BUCKET:-caddy-certs}
       S3_REGION: ${S3_REGION:-us-east-1}
@@ -101,8 +115,10 @@ services:
       RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-rustfsadmin}
       RUSTFS_ADDRESS: 0.0.0.0:9000
       RUSTFS_VOLUMES: /data
+    # Loopback only: it holds the certificate keys, behind default
+    # credentials.
     ports:
-      - "${S3_BIND:-9000}:9000"
+      - "${S3_BIND:-127.0.0.1:9000}:9000"
     volumes:
       - rustfs-data:/data
 

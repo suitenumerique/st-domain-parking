@@ -87,7 +87,10 @@ done
 
 echo
 echo "Routing"
-check "http is redirected to https"      "302"  "$(curl -s -o /dev/null -w '%{http_code}' "$HTTP/" -H "Host: $PARKED")"
+check "http is redirected to https"      "https://$PARKED/deep" \
+	"$(curl -s -o /dev/null -w '%{redirect_url}' "$HTTP/deep" -H "Host: $PARKED")"
+check "http apex goes straight to www"   "https://$PARKED/" \
+	"$(curl -s -o /dev/null -w '%{redirect_url}' "$HTTP/deep" -H "Host: $APEX")"
 check "http to an unknown host is a 404" "404"  "$(curl -s -o /dev/null -w '%{http_code}' "$HTTP/" -H "Host: $UNKNOWN")"
 check "http helpcenter goes to the target" "$HELPCENTER_TARGET" \
 	"$(curl -s -o /dev/null -w '%{redirect_url}' "$HTTP/" -H "Host: $HELPCENTER")"

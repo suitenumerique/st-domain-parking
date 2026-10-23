@@ -27,9 +27,10 @@ var brigny = Site{
 	Siret:            "21510372200017",
 }
 
+// mustBuild builds with the unpark check off: see TestABuildUnparksAtMost.
 func mustBuild(t *testing.T, sites []Site, dir string) {
 	t.Helper()
-	if err := build(sites, dir); err != nil {
+	if err := build(sites, dir, 100); err != nil {
 		t.Fatalf("build: %v", err)
 	}
 }
@@ -303,11 +304,75 @@ func TestAFailedBuildPrunesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := build([]Site{brigny, blocked}, dir); err == nil {
+	if err := build([]Site{brigny, blocked}, dir, 100); err == nil {
 		t.Fatal("build succeeded")
 	}
 	if !exists(filepath.Join(dir, "www.gone.fr", page)) {
 		t.Error("a failed build pruned gone.fr")
+	}
+}
+
+// communes returns count sites, commune-0.fr onwards.
+func communes(count int) []Site {
+	var sites []Site
+	for index := range count {
+		site := brigny
+		site.Domain = fmt.Sprintf("commune-%d.fr", index)
+		sites = append(sites, site)
+	}
+	return sites
+}
+
+func TestABuildUnparksAtMost(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		kept, max int
+		refused   bool
+	}{
+		{"1 of 10 removed, at 10%", 9, 10, false},
+		{"2 of 10 removed, at 10%", 8, 10, true},
+		{"9 of 10 removed, at 100%", 1, 100, false},
+		{"1 of 10 removed, at 0%", 9, 0, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustBuild(t, communes(10), dir)
+
+			// A new domain in the same list does not offset the ones removed.
+			sites := append(communes(tt.kept), Site{Domain: "new.fr"})
+			err := build(sites, dir, tt.max)
+
+			if tt.refused != (err != nil) {
+				t.Fatalf("refused = %v, want %v (%v)", err != nil, tt.refused, err)
+			}
+			if tt.refused {
+				if !strings.Contains(err.Error(), "MAX_UNPARK_PERCENT") {
+					t.Errorf("the error does not name the setting: %v", err)
+				}
+				// Refused before anything was written or removed.
+				if !exists(filepath.Join(dir, "www.commune-9.fr", page)) || exists(filepath.Join(dir, "www.new.fr")) {
+					t.Error("a refused build changed the tree")
+				}
+			} else if exists(filepath.Join(dir, "www.commune-9.fr")) {
+				t.Error("commune-9.fr was not pruned")
+			}
+		})
+	}
+}
+
+// Directories that are not ours do not count as parked, or they would let
+// a larger share of the real hosts go.
+func TestUnmanagedDirectoriesDoNotCountAsParked(t *testing.T) {
+	dir := t.TempDir()
+	mustBuild(t, communes(10), dir)
+	for index := range 90 {
+		if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("not-ours-%d", index)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := build(communes(8), dir, 10); err == nil {
+		t.Fatal("unmarked directories let 20% of the hosts be unparked")
 	}
 }
 

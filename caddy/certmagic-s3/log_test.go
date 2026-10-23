@@ -2,6 +2,7 @@ package s3
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -89,6 +90,30 @@ func TestSDKLoggerRespectsLevel(t *testing.T) {
 	logged = buffer.String()
 	if !strings.Contains(logged, "response has no supported checksum") || !strings.Contains(logged, `"level":"debug"`) {
 		t.Errorf(`expected the Debug message at "level":"debug", got: %s`, logged)
+	}
+}
+
+// The calls certmagic makes per certificate, on every load and on every
+// storage-cleaning pass, log nothing at Caddy's default level.
+func TestPerCertificateCallsLogAtDebug(t *testing.T) {
+	f, srv := newFakeS3(t)
+	s := f.instance(srv)
+	s.iowrap = &CleartextIO{}
+	logger, buffer := newBufferLogger(zapcore.InfoLevel)
+	s.Logger = logger
+
+	ctx := context.Background()
+	if err := s.Store(ctx, "certificates/x/x.crt", []byte("crt")); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	if _, err := s.Load(ctx, "certificates/x/x.crt"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := s.Stat(ctx, "certificates/x/x.crt"); err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if logged := buffer.String(); logged != "" {
+		t.Errorf("logged at info level or above:\n%s", logged)
 	}
 }
 

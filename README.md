@@ -36,7 +36,8 @@ will serve is the directory tree itself:
   of those exhaust the ACME account's rate limits for every other host. The
   check only runs for a parked host whose certificate is not already in
   memory, so about once per host after a restart, and never on rebuilds.
-- **Apex → www** is a single global rule.
+- **Apex → www** is a single global rule. On HTTP the apex goes straight to
+  `https://www.<domain>/`, saving a TLS handshake on the apex.
 - **Any path other than `/`** redirects back to `/`.
 - **`/favicon.ico`** answers 204: the icon is an inline data URI, and a 204
   stops browsers that ask anyway from retrying.
@@ -147,8 +148,9 @@ Builder:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DOMAINS_URL` | *(required)* | Location of the JSON file: `https://`, `s3://`, `file://` or a path |
+| `DOMAINS_URL` | *(required)* | Location of the JSON file: `https://`, `s3://`, `file://` or a path. An `https://` fetch refuses a redirect to plain `http://` |
 | `REBUILD_INTERVAL` | `300` | Seconds between refetches. `0` builds once and exits |
+| `MAX_UNPARK_PERCENT` | `10` | A list that would unpark more than this share of the parked hosts is refused (see below). `100` turns the check off |
 | `OUTPUT_DIR` | `/srv/sites` | Root of the generated tree |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN` or `ERROR` |
 
@@ -178,6 +180,8 @@ Caddy:
 | `CACHE_MAX_AGE` | `300` | `Cache-Control: max-age` on the pages |
 | `HTTP_PORT` / `HTTPS_PORT` | `8080` / `8443` | Ports inside the container |
 | `PUBLIC_IPS` | *(empty)* | Space-separated addresses the hosts' DNS must point at before a certificate is ordered (see below). Empty skips the check; set it in production |
+| `CERT_CACHE_CAPACITY` | `100000` | Certificates kept in memory (see [Certificate cache](#certificate-cache)) |
+| `STORAGE_CLEAN_INTERVAL` | `7d` | How often the bucket is swept for certificates expired for two weeks. A Caddy duration (`12h`, `7d`) or `off` |
 | `CADDY_TLS_ISSUER` | *(empty)* | Empty is real ACME; `internal` uses Caddy's local CA |
 | `HELPCENTER_REDIRECT_HOSTS` | *(empty)* | Space-separated, lowercase hostnames to redirect to the helpcenter |
 | `HELPCENTER_REDIRECT_TARGET` | *(empty)* | Absolute URL of the helpcenter page |
@@ -242,7 +246,8 @@ At runtime the server is cut down to what one 1.6 kB page needs:
   credentials.
 
 `compose.yaml` runs the container with a read-only root filesystem, no
-capabilities and `no-new-privileges`.
+capabilities and `no-new-privileges`, and the builder the same way. The
+development RustFS only listens on loopback (`S3_BIND`).
 
 ```sh
 make test-caddy       # gofmt + go vet + go test on main.go, the adapter and the permission
@@ -282,9 +287,12 @@ estate is past that limit.
 
 The capacity can only be set in Caddy's JSON config, so Caddy runs the
 Caddyfile through a small config adapter, `caddy/adapter/`, which adapts it as
-usual and then sets the capacity to 100,000. A cached certificate takes a few
-kB, so a full cache is a few hundred MB; only the certificates requested since
-startup are loaded. `make test-caddy` covers it.
+usual and then sets the capacity to `CERT_CACHE_CAPACITY`, 100,000 by default.
+Keep it above twice the number of domains: past it, every handshake for an
+evicted certificate costs three S3 reads and a DNS lookup, and evictions keep
+coming. A cached certificate takes a few kB, so a full cache is a few hundred
+MB; only the certificates requested since startup are loaded. `make
+test-caddy` covers it.
 
 ## The domain list
 
@@ -308,7 +316,9 @@ A bare list of domain objects is also accepted.
 **All six fields are mandatory, and no others are allowed.** A half-filled
 entry would render a page with gaps in it, which is worse than a build that
 refuses to run. Every value is validated — the domain as a hostname, the
-zipcode as 5 digits, the SIRET as 14, the email as an address, and
+zipcode as 5 digits, the SIRET as 14, the email as a plain address (letters,
+digits, `.`, `_`, `+`, `-`: `?`, `&`, `=` or `%` would add headers to the
+`mailto:` link), and
 `service_public_url` as a `lannuaire.service-public.gouv.fr` URL (the
 pre-move `lannuaire.service-public.fr` form is also accepted). One bad entry
 fails the whole build.
@@ -320,6 +330,13 @@ cost a full re-issuance of the estate, against the rate limits, long after the
 feed was put right. An empty answer is treated like an unreachable one: logged,
 skipped, previous build still served. Unparking everything on purpose means
 stopping the service, not emptying the list.
+
+**So is a list that shrinks too much at once.** A feed that loses most of its
+entries does the same damage to those domains. A build that would unpark more
+than `MAX_UNPARK_PERCENT` (10 % by default) of the hosts parked now is refused
+before it writes anything, and logged at every refetch until the list comes
+back. For a deliberate large removal, raise the value and restart the builder,
+then set it back.
 
 The page is served from `www.<domain>`; a leading `www.` in the domain list is
 stripped, so the two can never disagree. `siret` builds the *Présence

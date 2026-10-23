@@ -83,7 +83,8 @@ It checks the Caddy logs: they contain access lines, no heartbeat path, and
 no SDK debug line. It checks the hardening: HTTP/1.1 only and no `Alt-Svc`,
 no keep-alive, 421 when the Host does not match the SNI, 405 for a POST, a
 404 rather than a redirect for an unknown host on HTTP, and no config
-autosave.
+autosave. It checks that the apex on HTTP redirects straight to the `www`
+page.
 
 The image build itself checks that the binary registers exactly the modules
 in `caddy/modules.txt`.

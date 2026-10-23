@@ -116,6 +116,12 @@ func TestADomainListedTwiceIsRejected(t *testing.T) {
 	loadFails(t, write(t, []any{valid(), with(map[string]any{"domain": "www.brigny.fr"})}), "domains[1]: brigny.fr is listed more than once")
 }
 
+func TestUsualEmailAddressesAreAccepted(t *testing.T) {
+	for _, email := range []string{"mairie.de-brigny+contact@brigny.fr", "accueil@saint-andré.fr", "élu@brigny.fr"} {
+		mustLoad(t, write(t, []any{with(map[string]any{"email": email})}))
+	}
+}
+
 func TestAnUppercaseEmailDomainIsAccepted(t *testing.T) {
 	sites := mustLoad(t, write(t, []any{with(map[string]any{"email": "Contact@Mairie-Brigny.FR"})}))
 
@@ -157,6 +163,12 @@ func TestMalformedValuesAreRejected(t *testing.T) {
 		{"commune_zipcode", "٨٧٢٠٠"},
 		{"email", "nope"},
 		{"email", "a@b"},
+		{"email", "a@b.fr?bcc=x@y.fr"},
+		{"email", "a@b.fr?subject=x"},
+		{"email", "a&b@b.fr"},
+		{"email", "a%0Abcc:x@b.fr"},
+		{"email", "a=b@b.fr"},
+		{"email", "a@b..fr"},
 		{"siret", "123"},
 		{"siret", "2151037220001x"},
 		{"service_public_url", "https://evil.example/x"},
@@ -217,6 +229,35 @@ func TestAnHTTPURLIsRead(t *testing.T) {
 	}
 	// An error page is not a domain list, whatever it contains.
 	loadFails(t, srv.URL+"/missing.json", "404")
+}
+
+// A list fetched over https is never read over plain http, whatever the
+// server redirects to. A redirect that stays on https is still followed.
+func TestAnHTTPSFetchRefusesADowngrade(t *testing.T) {
+	body, _ := json.Marshal([]any{valid()})
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer plain.Close()
+	var secure *httptest.Server
+	secure = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/to-http":
+			http.Redirect(w, r, plain.URL+"/domains.json", http.StatusFound)
+		case "/to-https":
+			http.Redirect(w, r, secure.URL+"/domains.json", http.StatusFound)
+		default:
+			_, _ = w.Write(body)
+		}
+	}))
+	defer secure.Close()
+
+	previous := httpClient.Transport
+	httpClient.Transport = secure.Client().Transport
+	defer func() { httpClient.Transport = previous }()
+
+	loadFails(t, secure.URL+"/to-http", "leaves https")
+	mustLoad(t, secure.URL+"/to-https")
 }
 
 // AWS_ENDPOINT_URL points s3:// at an S3-compatible store, addressed
