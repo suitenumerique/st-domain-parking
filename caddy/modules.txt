@@ -4,6 +4,7 @@ caddy.adapters.caddyfile
 caddy.adapters.parking
 caddy.config_loaders.http
 caddy.listeners.http_redirect
+caddy.listeners.proxy_protocol
 caddy.listeners.tls
 caddy.logging.cores.mock
 caddy.logging.encoders.append

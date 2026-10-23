@@ -180,6 +180,7 @@ Caddy:
 | `CACHE_MAX_AGE` | `300` | `Cache-Control: max-age` on the pages |
 | `HTTP_PORT` / `HTTPS_PORT` | `8080` / `8443` | Ports inside the container |
 | `PUBLIC_IPS` | *(empty)* | Space-separated addresses the hosts' DNS must point at before a certificate is ordered (see below). Empty skips the check; set it in production |
+| `TRUSTED_PROXIES` | *(empty)* | Space-separated CIDR ranges of the load balancers. A PROXY protocol header (v1 or v2, the load balancer runs in TCP mode) from these ranges sets `remote_ip` and `client_ip`; from any other peer it is dropped. A connection without a header is accepted either way, so probes keep working. `X-Forwarded-For` is trusted from the same ranges. Ranges only: a bare address or Caddy's `private_ranges` keyword stops Caddy at startup, since the PROXY protocol listener takes neither. Empty trusts no peer |
 | `CERT_CACHE_CAPACITY` | `100000` | Certificates kept in memory (see [Certificate cache](#certificate-cache)) |
 | `STORAGE_CLEAN_INTERVAL` | `7d` | How often the bucket is swept for certificates expired for two weeks. A Caddy duration (`12h`, `7d`) or `off` |
 | `CADDY_TLS_ISSUER` | *(empty)* | Empty is real ACME; `internal` uses Caddy's local CA |

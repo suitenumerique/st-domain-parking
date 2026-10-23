@@ -81,6 +81,10 @@ services:
       # No certificate is ordered for a host with any record elsewhere. Empty
       # skips the check: set it in production.
       PUBLIC_IPS: ${PUBLIC_IPS:-}
+      # Space-separated CIDR ranges of the load balancers, whose PROXY protocol
+      # header and X-Forwarded-For are trusted. Ranges only: no bare address,
+      # no private_ranges.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       # Certificates kept in memory. Keep it above twice the domain count,
       # or handshakes start reloading certificates from S3.
       CERT_CACHE_CAPACITY: ${CERT_CACHE_CAPACITY:-100000}

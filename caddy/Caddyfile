@@ -1,5 +1,4 @@
-# Static configuration: never regenerated, never reloaded.
-#
+# Static config: the parked set is <OUTPUT_DIR>/<host>/.parked on disk, no reload.
 # The set of parked domains is expressed purely on the filesystem. For every
 # host it serves, the builder creates <OUTPUT_DIR>/<host>/ containing a
 # `.parked` marker; the canonical host additionally gets index.html and its
@@ -7,63 +6,57 @@
 # file operation — Caddy picks it up on the next request with no reload.
 {
 	admin off
-	# Caddy otherwise saves the adapted config to disk on every start, and it
-	# carries the S3 credentials in clear text.
+	# The adapted config carries the S3 credentials in clear text.
 	persist_config off
-	# Quoted so an unset ACME_EMAIL still expands to one (empty) token, which
-	# Caddy reads as "register without a contact address". Same trick for every
-	# optional value below: without the quotes an empty variable expands to no
-	# token at all and the directive fails to parse.
+	# Quoted: an empty variable must still expand to one token.
 	email "{$ACME_EMAIL}"
 	http_port {$HTTP_PORT:80}
 	https_port {$HTTPS_PORT:443}
 
 	servers {
-		# HTTP/1.1 only. A page that is a single request gains nothing from
-		# HTTP/2 multiplexing, and h2 and h3 are where the recent HTTP DoS
-		# bugs were. h3 would also open a QUIC listener and advertise it.
-		# The binary is built without the standard library's HTTP/2 (see
-		# the Dockerfile): enabling h2 here makes Caddy panic at startup.
+		# Built without HTTP/2 (nethttpomithttp2): enabling h2 panics at startup.
 		protocols h1
-		# The Host header must match the SNI the certificate was chosen for,
-		# so one host's connection cannot fetch another host's page.
 		strict_sni_host on
 		timeouts {
-			# Go bounds the TLS handshake by this too, and the first
-			# handshake for a new host waits for its certificate to be
-			# issued: leave it the time to.
+			# Bounds the TLS handshake too, and the first one waits for issuance.
 			read_header 30s
-			# Nothing here reads a request body.
 			read_body 5s
 		}
 		max_header_size 8KiB
+		# The load balancer runs in TCP mode, so the client address arrives
+		# in a PROXY header, read ahead of the TLS handshake. The header is
+		# used from TRUSTED_PROXIES and dropped from any other peer. Unquoted:
+		# empty expands to no token, so no peer is trusted.
+		listener_wrappers {
+			proxy_protocol {
+				timeout 5s
+				allow {$TRUSTED_PROXIES}
+			}
+			tls
+		}
+		# The same list for X-Forwarded-For, behind a layer-7 proxy.
+		trusted_proxies static {$TRUSTED_PROXIES}
+		trusted_proxies_strict
+		client_ip_headers X-Forwarded-For
 	}
 
-	# Certificates live in S3, not on a local disk, so instances are
-	# interchangeable and a rebuilt container does not re-issue everything.
-	# Backed by our vendored certmagic-s3 (see certmagic-s3/VENDORED.md).
+	# Vendored certmagic-s3, see certmagic-s3/VENDORED.md.
 	storage s3 {
 		bucket "{$S3_BUCKET}"
 		region "{$S3_REGION:us-east-1}"
-		# Empty for real AWS; set it for MinIO, RustFS, Scaleway, Garage, ...
 		endpoint "{$S3_ENDPOINT}"
 		access_key "{$S3_ACCESS_KEY}"
 		secret_key "{$S3_SECRET_KEY}"
 		prefix "{$S3_PREFIX:caddy}"
-		# Optional client-side encryption of the stored keys. Exactly 32 bytes
-		# when set; empty leaves them in clear text.
+		# Exactly 32 bytes when set.
 		encryption_key "{$S3_ENCRYPTION_KEY}"
 	}
-	# Each pass reads every stored certificate, to delete the ones expired
-	# for two weeks. Caddy's default is daily. The last pass is recorded in
-	# the bucket, so restarts do not make it run more often.
+	# Each pass reads every stored certificate.
 	storage_clean_interval {$STORAGE_CLEAN_INTERVAL:7d}
 
 	# Certificates are issued lazily, but only for parked and helpcenter
 	# hosts, and only once their DNS points at PUBLIC_IPS (see permission/).
-	# Without that gate, anyone pointing a DNS record at this server could
-	# burn through the ACME rate limits. {env.*} is read at provision time,
-	# so the values are data, never config text.
+	# Avoids to burn ACME rate limits.
 	on_demand_tls {
 		permission parking {
 			root {$OUTPUT_DIR:/srv/sites}
@@ -74,7 +67,6 @@
 	}
 }
 
-# What both listeners share.
 (common) {
 	log {
 		output stdout
@@ -83,30 +75,20 @@
 
 	header {
 		-Server
-		# No keep-alive: a visit is one request (the redirects change host or
-		# scheme, so they need a new connection anyway), and an idle
-		# connection per visitor across thousands of hosts holds resources
-		# for nothing.
+		# A visit is one request.
 		Connection close
 	}
 
 	root * {$OUTPUT_DIR:/srv/sites}
 
 	@parked file /{host}/.parked
-	# Helpcenter hosts have no marker. Caddy reads {env.*} at request time,
-	# so the value is data, never config text, and `in` is an exact match
-	# with no wildcard. Backticks keep the inner quotes and spaces inside one
-	# token. The target check matches nothing in a half-configured
-	# deployment.
+	# {env.*} is read at request time, and `in` is an exact match.
 	@helpcenter expression `{host} != "" && {env.HELPCENTER_REDIRECT_TARGET} != "" && {host} in {env.HELPCENTER_REDIRECT_HOSTS}.split(" ")`
 	@heartbeat path /__lbheartbeat__ /__lbheartbeat__/
 	@notget not method GET HEAD
 }
 
-# Plain HTTP only redirects our own hosts to HTTPS. ACME HTTP-01 challenges
-# are handled by Caddy ahead of this route.
-#
-# Every redirect here is temporary, on purpose: parking is a placeholder the
+# Every redirect is a 302 on purpose: parking is a placeholder. The
 # owner is expected to replace with a real site, and a 301 would sit in
 # browser caches long after that happened.
 http:// {
@@ -122,7 +104,6 @@ http:// {
 	route {
 		respond @notget 405
 
-		# Caddy answers the load-balancer probe here, before the redirects.
 		handle @heartbeat {
 			log_skip
 			respond 200
@@ -138,14 +119,11 @@ http:// {
 https:// {
 	import common
 
-	# Empty expands to `tls {`, the real ACME issuer. Set CADDY_TLS_ISSUER to
-	# `internal` to use Caddy's local CA instead — the end-to-end test does
-	# that, since no public DNS points here.
+	# Empty is the real ACME issuer, `internal` is Caddy's local CA.
 	tls {$CADDY_TLS_ISSUER} {
 		on_demand
 	}
 
-	# Handles are tried in the order written.
 	handle @notget {
 		respond 405
 	}
@@ -160,28 +138,17 @@ https:// {
 	}
 
 	handle @parked {
-		# One `route` for the whole block: inside it directives run in written
-		# order, whereas Caddy would otherwise sort `redir` ahead of `handle`
-		# and the catch-all redirect would swallow the two carve-outs below.
+		# Caddy would otherwise sort redir ahead of handle.
 		route {
-			# Apex to www, in one hop: every path collapses to the root anyway.
 			@apex expression !{host}.startsWith("www.")
 			redir @apex https://www.{host}/ 302
 
-			# The page carries its icon as an inline data URI, so there is no
-			# file to serve. 204 stops browsers that ask anyway from retrying,
-			# which a redirect to an HTML page would not.
+			# The icon is inline; 204 stops the retries.
 			handle /favicon.ico {
 				respond 204
 			}
 
-			# Served rather than redirected: crawlers treat a redirected
-			# robots.txt as absent.
-			#
-			# Crawling is deliberately allowed even though the page is
-			# noindex. Disallowing it here would stop crawlers ever reading
-			# that noindex, and a blocked URL can still be indexed bare —
-			# the opposite of what we want.
+			# Served, not redirected, and allowed: a crawler must read the page to see its noindex.
 			handle /robots.txt {
 				header Content-Type "text/plain; charset=utf-8"
 				respond "User-agent: *
@@ -199,8 +166,6 @@ Allow: /
 				Cache-Control "public, max-age={$CACHE_MAX_AGE:300}"
 				X-Content-Type-Options "nosniff"
 				Referrer-Policy "no-referrer"
-				# The page is entirely self-contained: inline styles, a
-				# data-URI favicon, no scripts, no external requests.
 				Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 			}
 

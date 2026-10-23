@@ -18,6 +18,8 @@ import (
 	// file_server and the file matcher.
 	_ "github.com/caddyserver/caddy/v2/modules/caddyhttp/fileserver"
 	_ "github.com/caddyserver/caddy/v2/modules/caddyhttp/headers"
+	// The proxy_protocol listener wrapper.
+	_ "github.com/caddyserver/caddy/v2/modules/caddyhttp/proxyprotocol"
 	// The json log encoder.
 	_ "github.com/caddyserver/caddy/v2/modules/logging"
 
