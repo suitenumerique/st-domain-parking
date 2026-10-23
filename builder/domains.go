@@ -50,7 +50,10 @@ var patterns = []struct {
 	{"domain", regexp.MustCompile(`^` + label + `(?:\.` + label + `)+$`), "a domain name"},
 	{"commune_name", regexp.MustCompile(`^[^\x00-\x1f]{1,100}$`), "a commune name"},
 	{"commune_zipcode", regexp.MustCompile(`^[0-9]{5}$`), "5 digits"},
-	{"email", regexp.MustCompile(`^[^@\s<>"']+@[^@\s<>"']+\.[a-zA-Z]{2,}$`), "an email address"},
+	// Narrower than what RFC 5322 allows: the address goes into a mailto:
+	// link, where `?`, `&`, `=` and `%` would add headers or a body to the
+	// message the visitor sends. Accented letters stay allowed.
+	{"email", regexp.MustCompile(`^[\pL\pN._+-]+@(?:[\pL\pN-]+\.)+[a-zA-Z]{2,}$`), "an email address"},
 	{"siret", regexp.MustCompile(`^[0-9]{14}$`), "14 digits"},
 	{
 		"service_public_url",
@@ -68,6 +71,20 @@ const maxDomain = 253
 // fetchTimeout bounds a whole fetch: a stalled one would block the refresh
 // loop, and with it SIGHUP and SIGTERM.
 var fetchTimeout = 30 * time.Second
+
+// httpClient follows redirects like Go's default client, except from https
+// to plain http, where anyone on the path could rewrite the list.
+var httpClient = &http.Client{CheckRedirect: refuseDowngrade}
+
+func refuseDowngrade(request *http.Request, via []*http.Request) error {
+	if via[0].URL.Scheme == "https" && request.URL.Scheme != "https" {
+		return fmt.Errorf("refusing the redirect to %s, which leaves https", request.URL.Redacted())
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
+}
 
 // Site is one parked domain. Every field comes straight from the domain list.
 type Site struct {
@@ -235,7 +252,7 @@ func fetchHTTP(ctx context.Context, rawURL string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
 		return nil, err
 	}

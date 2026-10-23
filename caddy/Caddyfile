@@ -7,6 +7,9 @@
 # file operation — Caddy picks it up on the next request with no reload.
 {
 	admin off
+	# Caddy otherwise saves the adapted config to disk on every start, and it
+	# carries the S3 credentials in clear text.
+	persist_config off
 	# Quoted so an unset ACME_EMAIL still expands to one (empty) token, which
 	# Caddy reads as "register without a contact address". Same trick for every
 	# optional value below: without the quotes an empty variable expands to no
@@ -14,6 +17,27 @@
 	email "{$ACME_EMAIL}"
 	http_port {$HTTP_PORT:80}
 	https_port {$HTTPS_PORT:443}
+
+	servers {
+		# HTTP/1.1 only. A page that is a single request gains nothing from
+		# HTTP/2 multiplexing, and h2 and h3 are where the recent HTTP DoS
+		# bugs were. h3 would also open a QUIC listener and advertise it.
+		# The binary is built without the standard library's HTTP/2 (see
+		# the Dockerfile): enabling h2 here makes Caddy panic at startup.
+		protocols h1
+		# The Host header must match the SNI the certificate was chosen for,
+		# so one host's connection cannot fetch another host's page.
+		strict_sni_host on
+		timeouts {
+			# Go bounds the TLS handshake by this too, and the first
+			# handshake for a new host waits for its certificate to be
+			# issued: leave it the time to.
+			read_header 30s
+			# Nothing here reads a request body.
+			read_body 5s
+		}
+		max_header_size 8KiB
+	}
 
 	# Certificates live in S3, not on a local disk, so instances are
 	# interchangeable and a rebuilt container does not re-issue everything.
@@ -30,61 +54,90 @@
 		# when set; empty leaves them in clear text.
 		encryption_key "{$S3_ENCRYPTION_KEY}"
 	}
+	# Each pass reads every stored certificate, to delete the ones expired
+	# for two weeks. Caddy's default is daily. The last pass is recorded in
+	# the bucket, so restarts do not make it run more often.
+	storage_clean_interval {$STORAGE_CLEAN_INTERVAL:7d}
 
-	# Certificates are issued lazily, but only for hosts the builder has
-	# actually written out (see the allowlist endpoint below). Without that
-	# gate, anyone pointing a DNS record at this server could burn through
-	# the ACME rate limits.
+	# Certificates are issued lazily, but only for parked and helpcenter
+	# hosts, and only once their DNS points at PUBLIC_IPS (see permission/).
+	# Without that gate, anyone pointing a DNS record at this server could
+	# burn through the ACME rate limits. {env.*} is read at provision time,
+	# so the values are data, never config text.
 	on_demand_tls {
-		ask http://127.0.0.1:{$ASK_PORT:9000}/check
+		permission parking {
+			root {$OUTPUT_DIR:/srv/sites}
+			helpcenter_hosts {env.HELPCENTER_REDIRECT_HOSTS}
+			helpcenter_target {env.HELPCENTER_REDIRECT_TARGET}
+			public_ips {env.PUBLIC_IPS}
+		}
 	}
 }
 
-# Internal allowlist endpoint. Caddy asks itself, during the TLS handshake,
-# whether a directory exists for the host being negotiated. Bound to loopback
-# only, so it is not reachable from outside the container.
-http://127.0.0.1:{$ASK_PORT:9000} {
-	root * {$OUTPUT_DIR:/srv/sites}
-
-	@parked file /{query.domain}/.parked
-	respond @parked 200
-
-	# Helpcenter hosts have no marker, but they still need a certificate.
-	# Caddy reads {env.*} at request time, so the value is data, never config
-	# text, and `in` is an exact match with no wildcard. Backticks keep the
-	# inner quotes and spaces inside one token. The target check stops
-	# issuance for a half-configured deployment.
-	@helpcenter expression `{query.domain} != "" && {env.HELPCENTER_REDIRECT_TARGET} != "" && {query.domain} in {env.HELPCENTER_REDIRECT_HOSTS}.split(" ")`
-	respond @helpcenter 200
-
-	respond 404
-}
-
-# Everything on plain HTTP goes to HTTPS. ACME HTTP-01 challenges are handled
-# by Caddy ahead of this route.
-#
-# Every redirect here is temporary, on purpose: parking is a placeholder the
-# owner is expected to replace with a real site, and a 301 would sit in
-# browser caches long after that happened.
-http:// {
+# What both listeners share.
+(common) {
 	log {
 		output stdout
 		format json
 	}
 
+	header {
+		-Server
+		# No keep-alive: a visit is one request (the redirects change host or
+		# scheme, so they need a new connection anyway), and an idle
+		# connection per visitor across thousands of hosts holds resources
+		# for nothing.
+		Connection close
+	}
+
+	root * {$OUTPUT_DIR:/srv/sites}
+
+	@parked file /{host}/.parked
+	# Helpcenter hosts have no marker. Caddy reads {env.*} at request time,
+	# so the value is data, never config text, and `in` is an exact match
+	# with no wildcard. Backticks keep the inner quotes and spaces inside one
+	# token. The target check matches nothing in a half-configured
+	# deployment.
+	@helpcenter expression `{host} != "" && {env.HELPCENTER_REDIRECT_TARGET} != "" && {host} in {env.HELPCENTER_REDIRECT_HOSTS}.split(" ")`
+	@heartbeat path /__lbheartbeat__ /__lbheartbeat__/
+	@notget not method GET HEAD
+}
+
+# Plain HTTP only redirects our own hosts to HTTPS. ACME HTTP-01 challenges
+# are handled by Caddy ahead of this route.
+#
+# Every redirect here is temporary, on purpose: parking is a placeholder the
+# owner is expected to replace with a real site, and a 301 would sit in
+# browser caches long after that happened.
+http:// {
+	import common
+
+	# Straight to the page, rather than through the apex over HTTPS, which
+	# costs a TLS handshake only to redirect again.
+	@parkedapex {
+		file /{host}/.parked
+		expression !{host}.startsWith("www.")
+	}
+
 	route {
-		# Caddy answers the load-balancer probe here, before the redirect.
-		@heartbeat path /__lbheartbeat__ /__lbheartbeat__/
+		respond @notget 405
+
+		# Caddy answers the load-balancer probe here, before the redirects.
 		handle @heartbeat {
 			log_skip
 			respond 200
 		}
 
-		redir https://{host}{uri} 302
+		redir @helpcenter {env.HELPCENTER_REDIRECT_TARGET} 302
+		redir @parkedapex https://www.{host}/ 302
+		redir @parked https://{host}{uri} 302
+		respond 404
 	}
 }
 
 https:// {
+	import common
+
 	# Empty expands to `tls {`, the real ACME issuer. Set CADDY_TLS_ISSUER to
 	# `internal` to use Caddy's local CA instead — the end-to-end test does
 	# that, since no public DNS points here.
@@ -92,28 +145,20 @@ https:// {
 		on_demand
 	}
 
-	log {
-		output stdout
-		format json
+	# Handles are tried in the order written.
+	handle @notget {
+		respond 405
 	}
 
-	root * {$OUTPUT_DIR:/srv/sites}
-
-	@heartbeat path /__lbheartbeat__ /__lbheartbeat__/
 	handle @heartbeat {
 		log_skip
-		header -Server
 		respond 200
 	}
 
-	# Same checks as the ask endpoint above, on the Host header this time.
-	@helpcenter expression `{host} != "" && {env.HELPCENTER_REDIRECT_TARGET} != "" && {host} in {env.HELPCENTER_REDIRECT_HOSTS}.split(" ")`
 	handle @helpcenter {
-		header -Server
 		redir {env.HELPCENTER_REDIRECT_TARGET} 302
 	}
 
-	@parked file /{host}/.parked
 	handle @parked {
 		# One `route` for the whole block: inside it directives run in written
 		# order, whereas Caddy would otherwise sort `redir` ahead of `handle`
@@ -157,7 +202,6 @@ Allow: /
 				# The page is entirely self-contained: inline styles, a
 				# data-URI favicon, no scripts, no external requests.
 				Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-				-Server
 			}
 
 			rewrite * /{host}/index.html
@@ -170,7 +214,6 @@ Allow: /
 	# Unknown host: a certificate may exist from an earlier build, but the
 	# domain is no longer parked here.
 	handle {
-		header -Server
 		respond 404
 	}
 }

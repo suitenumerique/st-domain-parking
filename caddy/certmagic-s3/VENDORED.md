@@ -8,9 +8,10 @@ local disk.
 - Licence: Apache 2.0 (see `LICENSE`)
 
 The build keeps the module path as `github.com/techknowlogick/certmagic-s3`.
-An xcaddy `--with …@<tag>=<dir>` replacement substitutes this directory for it, so
-rebasing on upstream stays a plain diff. `<tag>` is `CERTMAGIC_S3_VERSION` in
-`caddy/Dockerfile`: keep it equal to the fork tag above.
+A `replace` in `caddy/go.mod` substitutes this directory for it, so rebasing
+on upstream stays a plain diff. Keep the version that `caddy/go.mod` requires
+equal to the fork tag above: it is what the binary reports, and what scanners
+match.
 
 ## Why vendored
 
@@ -144,6 +145,18 @@ Every one is marked `LOCAL CHANGE` in the source.
    line per certificate on every pass. The line is a trace of one call, and
    belongs at debug level.
 
+9. **The lock timing tests turn the SDK's retries off** (`lock_test.go`,
+   `newUnreachableS3`). With the default retryer, each call to the
+   unreachable endpoint backed off with jitter for up to several seconds, so
+   `TestLockGivesUpOnPersistentError` took anywhere from 1 to 5 s and failed
+   in CI against its 5 s bound. Without SDK retries it takes exactly
+   `LockTimeout`.
+
+10. **`Load()` and `Store()` log at debug level**, like change 8. Loading one
+    certificate is three loads, so a restart warming the cache, or a storage
+    cleaning pass over the whole estate, was three INFO lines per
+    certificate. certmagic logs issuance and renewal itself.
+
 ### Local-only files
 
 - `VENDORED.md` — this file.
@@ -153,8 +166,9 @@ Every one is marked `LOCAL CHANGE` in the source.
   `TestListReturnsImmediateChildren`, `TestListCollectsDirectoriesAcrossPages`,
   `TestStatReportsDirectory` and
   `TestExistsReportsDirectory`.
-- `log_test.go` — tests the log-redaction change (`MarshalLogObject`) and the
-  SDK log bridge (`sdkLogger`). Upstream has neither.
+- `log_test.go`: tests the log-redaction change (`MarshalLogObject`), the
+  SDK log bridge (`sdkLogger`) and the debug-level calls (changes 8 and 10).
+  Upstream has none of them.
 - `fakes3_test.go` — the in-memory S3 used by the tests. It now also
   answers `ListObjectsV2`, with the delimiter S3 uses to emulate
   directories, so the listing behaviour can be tested without a store.

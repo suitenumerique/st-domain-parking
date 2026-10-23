@@ -44,6 +44,7 @@ func TestAdapterIsRegistered(t *testing.T) {
 // The output is the Caddyfile adapter's, with the cache capacity set and
 // nothing else changed.
 func TestAdaptSetsOnlyTheCacheCapacity(t *testing.T) {
+	t.Setenv("CERT_CACHE_CAPACITY", "")
 	options := map[string]any{"filename": "Caddyfile"}
 
 	got, _, err := Adapter{}.Adapt([]byte(caddyfileBody), options)
@@ -68,6 +69,27 @@ func TestAdaptSetsOnlyTheCacheCapacity(t *testing.T) {
 	delete(tls, "cache")
 	if want := decode(t, plain); !reflect.DeepEqual(adapted, want) {
 		t.Errorf("Adapt changed more than the cache:\n got %v\nwant %v", adapted, want)
+	}
+}
+
+func TestCacheCapacityFromTheEnvironment(t *testing.T) {
+	t.Setenv("CERT_CACHE_CAPACITY", " 250000 ")
+	got, _, err := Adapter{}.Adapt([]byte(caddyfileBody), nil)
+	if err != nil {
+		t.Fatalf("Adapt: %v", err)
+	}
+	tls := decode(t, got)["apps"].(map[string]any)["tls"].(map[string]any)
+	if capacity := tls["cache"].(map[string]any)["capacity"]; capacity != float64(250_000) {
+		t.Errorf("apps.tls.cache.capacity = %v, want 250000", capacity)
+	}
+}
+
+func TestInvalidCacheCapacityIsRefused(t *testing.T) {
+	for _, value := range []string{"lots", "0", "-5", "1e6"} {
+		t.Setenv("CERT_CACHE_CAPACITY", value)
+		if _, _, err := (Adapter{}).Adapt([]byte(caddyfileBody), nil); err == nil {
+			t.Errorf("Adapt accepted CERT_CACHE_CAPACITY=%q", value)
+		}
 	}
 }
 

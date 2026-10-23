@@ -26,17 +26,25 @@ interface:
 Caddy's configuration is **static** and never reloaded. The list of domains it
 will serve is the directory tree itself:
 
-- **TLS** is issued on demand, gated by an allowlist endpoint Caddy serves to
-  itself on loopback. It answers 200 only when `<host>/.parked` exists, so a
-  stranger pointing DNS at the server cannot make it request certificates —
-  the TLS handshake is simply refused.
-- **Apex → www** is a single global rule.
+- **TLS** is issued on demand, gated by a permission module in our Caddy
+  build (`caddy/permission/`). It allows a certificate only when
+  `<host>/.parked` exists, so a stranger pointing DNS at the server cannot
+  make it request certificates: the TLS handshake is simply refused. With
+  `PUBLIC_IPS` set, it also checks that every A/AAAA record of the host
+  points here. A parked host whose DNS points elsewhere would otherwise
+  make each handshake order a certificate that fails validation, and enough
+  of those exhaust the ACME account's rate limits for every other host. The
+  check only runs for a parked host whose certificate is not already in
+  memory, so about once per host after a restart, and never on rebuilds.
+- **Apex → www** is a single global rule. On HTTP the apex goes straight to
+  `https://www.<domain>/`, saving a TLS handshake on the apex.
 - **Any path other than `/`** redirects back to `/`.
 - **`/favicon.ico`** answers 204: the icon is an inline data URI, and a 204
   stops browsers that ask anyway from retrying.
 - **`/robots.txt`** is served, not redirected — a redirected robots.txt reads
   as absent to crawlers.
-- **Unknown hosts** get a 404.
+- **Unknown hosts** get a 404, on HTTP too: only parked and helpcenter hosts
+  are redirected to HTTPS.
 
 Adding or removing a domain is therefore a pure file operation: no reload, no
 restart, no config regeneration. Every redirect is temporary (302) on purpose —
@@ -140,8 +148,9 @@ Builder:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DOMAINS_URL` | *(required)* | Location of the JSON file: `https://`, `s3://`, `file://` or a path |
+| `DOMAINS_URL` | *(required)* | Location of the JSON file: `https://`, `s3://`, `file://` or a path. An `https://` fetch refuses a redirect to plain `http://` |
 | `REBUILD_INTERVAL` | `300` | Seconds between refetches. `0` builds once and exits |
+| `MAX_UNPARK_PERCENT` | `10` | A list that would unpark more than this share of the parked hosts is refused (see below). `100` turns the check off |
 | `OUTPUT_DIR` | `/srv/sites` | Root of the generated tree |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN` or `ERROR` |
 
@@ -170,10 +179,28 @@ Caddy:
 | `ACME_EMAIL` | *(none)* | Contact address for Let's Encrypt |
 | `CACHE_MAX_AGE` | `300` | `Cache-Control: max-age` on the pages |
 | `HTTP_PORT` / `HTTPS_PORT` | `8080` / `8443` | Ports inside the container |
-| `ASK_PORT` | `9000` | Loopback port for the TLS allowlist endpoint |
+| `PUBLIC_IPS` | *(empty)* | Space-separated addresses the hosts' DNS must point at before a certificate is ordered (see below). Empty skips the check; set it in production |
+| `CERT_CACHE_CAPACITY` | `100000` | Certificates kept in memory (see [Certificate cache](#certificate-cache)) |
+| `STORAGE_CLEAN_INTERVAL` | `7d` | How often the bucket is swept for certificates expired for two weeks. A Caddy duration (`12h`, `7d`) or `off` |
 | `CADDY_TLS_ISSUER` | *(empty)* | Empty is real ACME; `internal` uses Caddy's local CA |
 | `HELPCENTER_REDIRECT_HOSTS` | *(empty)* | Space-separated, lowercase hostnames to redirect to the helpcenter |
 | `HELPCENTER_REDIRECT_TARGET` | *(empty)* | Absolute URL of the helpcenter page |
+
+`PUBLIC_IPS` is matched against every address the host resolves to:
+
+- **List both families.** Every A *and* AAAA record must be in the list. A host
+  with an AAAA record is refused unless our IPv6 address is listed too, since
+  the CA may validate over IPv6.
+- **CNAMEs work.** The resolver follows the chain and the final addresses are
+  compared. Behind a load balancer whose IPs change (some cloud LBs), a fixed
+  list goes stale, and every host not yet in the certificate cache is then
+  refused.
+- **A resolver failure allows.** A timeout or SERVFAIL is not an answer, and
+  the check also runs before a certificate is loaded from storage, so refusing
+  would stop serving certificates we already have. Only an answer refuses: an
+  address elsewhere, no address at all, or NXDOMAIN.
+- **A refusal is remembered for a minute**, so a host whose DNS was just fixed
+  gets its certificate within a minute.
 
 
 Certificate storage (see below):
@@ -187,6 +214,45 @@ Certificate storage (see below):
 | `S3_PREFIX` | `caddy` | Key prefix within the bucket |
 | `S3_ENCRYPTION_KEY` | *(empty)* | Exactly 32 bytes to encrypt stored keys client-side |
 
+## The Caddy build
+
+`caddy/` is a Go module of our own: `main.go` links only the Caddy modules the
+Caddyfile uses, plus the S3 storage, the config adapter below and the
+on-demand TLS permission. The rest of
+the standard distribution (reverse_proxy, fastcgi, the ACME server, basic auth,
+tracing, …) is not in the binary, so no config can turn it on. `go.mod` and
+`go.sum` pin every dependency, and the image is a plain `go build` on the same
+Go image as the builder.
+
+`caddy/modules.txt` lists every registered module, and the image build fails
+if the binary registers a different set. A Caddy upgrade that adds a module
+therefore needs a reviewed update of that file.
+
+At runtime the server is cut down to what one 1.6 kB page needs:
+
+- **HTTP/1.1 only.** A single request gains nothing from HTTP/2, and h2 and h3
+  are where the recent HTTP DoS bugs were. There is no UDP listener and no
+  `Alt-Svc`. The binary is built without the standard library's HTTP/2
+  (`nethttpomithttp2`), so a config that enables h2 makes Caddy panic at
+  startup rather than quietly serving it.
+- **No keep-alive.** Every response carries `Connection: close`. A visit is
+  one request, and the redirects change host or scheme, so they need a new
+  connection anyway.
+- **The Host header must match the SNI**, or the request gets a 421.
+- **GET and HEAD only**, 405 otherwise. Headers are capped at 8 KiB, and a
+  client has 30 s to send them. That limit also bounds the TLS handshake, which
+  waits for the certificate on a host's first visit.
+- **The config is not autosaved.** The adapted JSON carries the S3
+  credentials.
+
+`compose.yaml` runs the container with a read-only root filesystem, no
+capabilities and `no-new-privileges`, and the builder the same way. The
+development RustFS only listens on loopback (`S3_BIND`).
+
+```sh
+make test-caddy       # gofmt + go vet + go test on main.go, the adapter and the permission
+```
+
 ## Certificate storage
 
 Certificates live in S3, not on a container disk, so instances are
@@ -194,8 +260,8 @@ interchangeable and a rebuilt container does not re-issue everything and walk
 into the Let's Encrypt rate limits.
 
 That comes from [certmagic-s3](https://github.com/techknowlogick/certmagic-s3),
-which is **vendored** into `caddy/certmagic-s3/` and compiled in with `xcaddy`
-from local source rather than fetched by version. The reasons and the local
+which is **vendored** into `caddy/certmagic-s3/` and compiled in from local
+source, through a `replace` in `caddy/go.mod`, rather than fetched by version. The reasons and the local
 changes are in [`caddy/certmagic-s3/VENDORED.md`](caddy/certmagic-s3/VENDORED.md).
 Upstream v1.5.0 fixes the bucket deletion during OCSP cleanup
 ([#21](https://github.com/techknowlogick/certmagic-s3/issues/21)) and the
@@ -209,8 +275,8 @@ make vendor-test      # gofmt + go vet + go test, in a container
 make vendor-update    # go get -u && go mod tidy, then re-check
 ```
 
-The Caddy build fails if the module does not end up registered, so a broken
-vendor drop cannot ship silently.
+The module check in the Caddy build covers it too, so a broken vendor drop
+cannot ship silently.
 
 ## Certificate cache
 
@@ -221,13 +287,12 @@ estate is past that limit.
 
 The capacity can only be set in Caddy's JSON config, so Caddy runs the
 Caddyfile through a small config adapter, `caddy/adapter/`, which adapts it as
-usual and then sets the capacity to 100,000. A cached certificate takes a few
-kB, so a full cache is a few hundred MB; only the certificates requested since
-startup are loaded.
-
-```sh
-make test-adapter     # gofmt + go vet + go test, in a container
-```
+usual and then sets the capacity to `CERT_CACHE_CAPACITY`, 100,000 by default.
+Keep it above twice the number of domains: past it, every handshake for an
+evicted certificate costs three S3 reads and a DNS lookup, and evictions keep
+coming. A cached certificate takes a few kB, so a full cache is a few hundred
+MB; only the certificates requested since startup are loaded. `make
+test-caddy` covers it.
 
 ## The domain list
 
@@ -251,7 +316,9 @@ A bare list of domain objects is also accepted.
 **All six fields are mandatory, and no others are allowed.** A half-filled
 entry would render a page with gaps in it, which is worse than a build that
 refuses to run. Every value is validated — the domain as a hostname, the
-zipcode as 5 digits, the SIRET as 14, the email as an address, and
+zipcode as 5 digits, the SIRET as 14, the email as a plain address (letters,
+digits, `.`, `_`, `+`, `-`: `?`, `&`, `=` or `%` would add headers to the
+`mailto:` link), and
 `service_public_url` as a `lannuaire.service-public.gouv.fr` URL (the
 pre-move `lannuaire.service-public.fr` form is also accepted). One bad entry
 fails the whole build.
@@ -263,6 +330,13 @@ cost a full re-issuance of the estate, against the rate limits, long after the
 feed was put right. An empty answer is treated like an unreachable one: logged,
 skipped, previous build still served. Unparking everything on purpose means
 stopping the service, not emptying the list.
+
+**So is a list that shrinks too much at once.** A feed that loses most of its
+entries does the same damage to those domains. A build that would unpark more
+than `MAX_UNPARK_PERCENT` (10 % by default) of the hosts parked now is refused
+before it writes anything, and logged at every refetch until the list comes
+back. For a deliberate large removal, raise the value and restart the builder,
+then set it back.
 
 The page is served from `www.<domain>`; a leading `www.` in the domain list is
 stripped, so the two can never disagree. `siret` builds the *Présence
@@ -282,6 +356,7 @@ make lint         # gofmt + go vet + caddy validate
 make test         # the builder's unit tests
 make test-e2e     # brings the whole stack up against RustFS and asserts
                   # routing, the TLS allowlist and certificates landing in S3
+make test-caddy   # gofmt + go vet + go test on main.go, the adapter and the permission
 make vendor-test  # gofmt + go vet + go test on the vendored plugin
 ```
 

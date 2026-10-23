@@ -172,7 +172,8 @@ func (s3 *S3) Store(ctx context.Context, key string, value []byte) error {
 		return fmt.Errorf("%w: cannot store empty value", ErrInvalidKey)
 	}
 
-	s3.Logger.Info("storing object",
+	// LOCAL CHANGE: debug, not info. See Load.
+	s3.Logger.Debug("storing object",
 		zap.String("key", objName),
 		zap.Int("size", len(value)),
 		zap.String("bucket", s3.Bucket),
@@ -205,7 +206,9 @@ func (s3 *S3) Load(ctx context.Context, key string) ([]byte, error) {
 	start := time.Now()
 	objName := s3.objName(key)
 
-	s3.Logger.Info("loading object",
+	// LOCAL CHANGE: debug, not info. Loading a certificate is three of
+	// these, and storage cleaning loads every certificate.
+	s3.Logger.Debug("loading object",
 		zap.String("key", objName),
 		zap.String("bucket", s3.Bucket),
 	)

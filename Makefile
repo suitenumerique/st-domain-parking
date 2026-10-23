@@ -46,6 +46,9 @@ BUILDER_RUN         = $(COMPOSE_RUN) --quiet-build --no-deps -v $(CURDIR):/app:r
 
 # Port the local preview server listens on.
 PREVIEW_PORT       ?= 8081
+# What the Caddy image serves the preview with: a bare file server, on HTTP/1.1
+# only, since the binary has no HTTP/2 (`caddy file-server` would enable it).
+PREVIEW_CADDYFILE   = {\n\tadmin off\n\tpersist_config off\n\tservers {\n\t\tprotocols h1\n\t}\n}\n:8081 {\n\troot * /preview\n\tfile_server\n}\n
 
 
 # ==============================================================================
@@ -93,9 +96,9 @@ preview: ## build the pages and serve them locally, to see what they look like
 	@echo ""
 	@echo "  $(GREEN)http://localhost:$(PREVIEW_PORT)/$$($(BUILDER_RUN) hosts | cut -d' ' -f1)/index.html$(RESET)"
 	@echo ""
-	@$(COMPOSE_RUN) --no-deps -p 127.0.0.1:$(PREVIEW_PORT):8081 \
+	@printf '$(PREVIEW_CADDYFILE)' | $(COMPOSE_RUN) -T --no-deps -p 127.0.0.1:$(PREVIEW_PORT):8081 \
 		-v $(abspath $(BUILD_DIR)):/preview:ro caddy \
-		file-server --root /preview --listen :8081
+		run --config /dev/stdin --adapter caddyfile
 .PHONY: preview
 
 clean: ## remove the generated pages
@@ -175,10 +178,11 @@ test: ## run the builder's unit tests
 	@$(GO_RUN) go test -race ./...
 .PHONY: test
 
-test-adapter: ## vet and test the Caddy config adapter
-	@docker run --rm -v $(PWD)/caddy/adapter:/src -w /src $(GO_IMAGE) sh -c '\
+# certmagic-s3/ is its own module, so ./... stops short of it: see vendor-test.
+test-caddy: ## vet and test the Caddy build: main.go, the config adapter, the TLS permission
+	@docker run --rm -v $(PWD)/caddy:/src -w /src $(GO_IMAGE) sh -c '\
 		! gofmt -l . | grep . && go vet ./... && go test -race ./...'
-.PHONY: test-adapter
+.PHONY: test-caddy
 
 test-e2e: ## run the end-to-end tests (brings the stack up against RustFS)
 	@./scripts/e2e.sh

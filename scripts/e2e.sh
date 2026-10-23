@@ -5,16 +5,20 @@
 # on-demand TLS gated by the allowlist, and certificates landing in S3.
 #
 # Caddy's local CA stands in for Let's Encrypt (CADDY_TLS_ISSUER=internal),
-# since no public DNS points at a laptop. Everything else is the real thing.
+# and e2e.compose.yaml pins the DNS records the permission checks, since no
+# public DNS points at a laptop. Everything else is the real thing.
 
 set -euo pipefail
 
-COMPOSE=(docker compose)
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+COMPOSE=(docker compose -f "$ROOT/compose.yaml" -f "$ROOT/scripts/e2e.compose.yaml")
 HTTP=http://localhost:${HTTP_BIND:-8080}
 HTTPS_PORT=${HTTPS_BIND:-8443}
 
 PARKED=www.brigny.fr
 APEX=brigny.fr
+# Parked, but its DNS points elsewhere (see e2e.compose.yaml).
+PARKED_ELSEWHERE=www.sainte-anne-sur-vilaine.fr
 UNKNOWN=not-parked.example
 HELPCENTER=help.example
 HELPCENTER_ALT=help-alt.example
@@ -83,7 +87,17 @@ done
 
 echo
 echo "Routing"
-check "http is redirected to https"      "302"  "$(curl -s -o /dev/null -w '%{http_code}' "$HTTP/" -H "Host: $PARKED")"
+check "http is redirected to https"      "https://$PARKED/deep" \
+	"$(curl -s -o /dev/null -w '%{redirect_url}' "$HTTP/deep" -H "Host: $PARKED")"
+check "http apex goes straight to www"   "https://$PARKED/" \
+	"$(curl -s -o /dev/null -w '%{redirect_url}' "$HTTP/deep" -H "Host: $APEX")"
+check "http to an unknown host is a 404" "404"  "$(curl -s -o /dev/null -w '%{http_code}' "$HTTP/" -H "Host: $UNKNOWN")"
+check "http helpcenter goes to the target" "$HELPCENTER_TARGET" \
+	"$(curl -s -o /dev/null -w '%{redirect_url}' "$HTTP/" -H "Host: $HELPCENTER")"
+# On the apex: file_server would refuse a POST to the page by itself.
+check "POST is refused on https"         "405"  "$(curl -sk -o /dev/null -w '%{http_code}' -X POST -d x \
+	--resolve "$APEX:$HTTPS_PORT:127.0.0.1" "https://$APEX:$HTTPS_PORT/")"
+check "POST is refused on http"          "405"  "$(curl -s -o /dev/null -w '%{http_code}' -X POST -d x "$HTTP/" -H "Host: $PARKED")"
 check "parked host serves the page"      "200"  "$(probe "$PARKED" /)"
 check "sub-path redirects to the root"   "302"  "$(probe "$PARKED" /deep/link)"
 check "the marker file is not served"    "302"  "$(probe "$PARKED" /.parked)"
@@ -113,11 +127,12 @@ check "brotli is served pre-compressed" "br" \
 
 echo
 echo "TLS allowlist"
-# An unknown host has no .parked marker, so the ask endpoint refuses issuance
+# An unknown host has no .parked marker, so the permission refuses issuance
 # and the handshake fails outright — curl reports 000, never a page.
 check "unknown host is refused a certificate" "000" "$(probe "$UNKNOWN" /)"
+check "parked host with DNS elsewhere is refused a certificate" "000" "$(probe "$PARKED_ELSEWHERE" /)"
 
-# Helpcenter hosts have no marker either, but the ask endpoint allows them
+# Helpcenter hosts have no marker either, but the permission allows them
 # explicitly, so the handshake succeeds and every path redirects to the URL.
 check "helpcenter host gets a certificate"  "302" "$(probe "$HELPCENTER" /)"
 check "helpcenter redirects to the target"  "$HELPCENTER_TARGET" "$(probe "$HELPCENTER" / '%{redirect_url}')"
@@ -138,6 +153,29 @@ caddy_logs=$("${COMPOSE[@]}" logs caddy 2>&1 || true)
 # "SDK " and "DEBUG" on two unrelated lines.
 sdk_debug_lines=$(printf '%s\n' "$caddy_logs" | grep -c 'SDK .*DEBUG' || true)
 check "SDK debug lines stay out of the logs" "0" "$sdk_debug_lines"
+
+echo
+echo "Hardening"
+# With HTTP/3 on, every response offers the QUIC listener in Alt-Svc.
+alt_svc=$(curl -sk -D- -o /dev/null --resolve "$PARKED:$HTTPS_PORT:127.0.0.1" \
+	"https://$PARKED:$HTTPS_PORT/" | awk 'tolower($1)=="alt-svc:"' || true)
+check "HTTP/3 is not advertised" "" "$alt_svc"
+check "HTTP/2 is not spoken" "1.1" \
+	"$(curl -sk --http2 -o /dev/null -w '%{http_version}' \
+		--resolve "$PARKED:$HTTPS_PORT:127.0.0.1" "https://$PARKED:$HTTPS_PORT/" || true)"
+check "the Host must match the SNI" "421" \
+	"$(curl -sk -o /dev/null -w '%{http_code}' -H "Host: $HELPCENTER" \
+		--resolve "$PARKED:$HTTPS_PORT:127.0.0.1" "https://$PARKED:$HTTPS_PORT/" || true)"
+# Two requests in one curl run reuse the connection whenever the server
+# allows it: each then reports zero new connections.
+check "connections are not kept alive" "1 1 " \
+	"$(curl -sk -o /dev/null -o /dev/null -w '%{num_connects} ' \
+		--resolve "$PARKED:$HTTPS_PORT:127.0.0.1" \
+		"https://$PARKED:$HTTPS_PORT/" "https://$PARKED:$HTTPS_PORT/robots.txt" || true)"
+# Caddy logs every autosave, and every failed one. The saved config would
+# carry the S3 secret key.
+[[ $caddy_logs == *autosave* ]] &&
+	fail "the config is not saved to disk" || pass "the config is not saved to disk"
 
 echo
 echo "Certificate storage in S3"

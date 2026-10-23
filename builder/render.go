@@ -97,11 +97,16 @@ func stripCSS(_ *minify.M, w io.Writer, r io.Reader, _ map[string]string) error 
 
 // build renders every site into outputDir and prunes anything stale.
 //
+// It refuses, before writing anything, a list that would unpark more than
+// maxUnpark percent of the hosts parked now: a feed that suddenly drops most
+// of its entries is far more likely broken than right, and acting on it
+// means re-issuing every certificate once it is fixed.
+//
 // Rendering, compressing and writing a page are independent of every other
 // page, so the work is spread over one goroutine per CPU; the pruning waits
 // for all of them, because it is the one step that needs the whole list. The
 // Go runtime sizes GOMAXPROCS from the container's CPU limit.
-func build(sites []Site, outputDir string) error {
+func build(sites []Site, outputDir string, maxUnpark int) error {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return err
 	}
@@ -111,6 +116,15 @@ func build(sites []Site, outputDir string) error {
 		for _, host := range site.Hosts() {
 			expected[host] = true
 		}
+	}
+
+	stale, parked, err := staleHosts(outputDir, expected)
+	if err != nil {
+		return err
+	}
+	if len(stale)*100 > parked*maxUnpark {
+		return fmt.Errorf("the domain list would unpark %d of the %d parked hosts, more than MAX_UNPARK_PERCENT (%d%%)",
+			len(stale), parked, maxUnpark)
 	}
 
 	jobs := make(chan Site)
@@ -154,12 +168,14 @@ func build(sites []Site, outputDir string) error {
 		return firstErr
 	}
 
-	pruned, err := prune(outputDir, expected)
-	if err != nil {
-		return err
+	for _, name := range stale {
+		if err := os.RemoveAll(filepath.Join(outputDir, name)); err != nil {
+			return err
+		}
+		slog.Info("Pruned " + name)
 	}
 
-	slog.Info(fmt.Sprintf("Build complete: %d domains, %d written, %d pruned", len(sites), written, pruned))
+	slog.Info(fmt.Sprintf("Build complete: %d domains, %d written, %d pruned", len(sites), written, len(stale)))
 	return nil
 }
 
@@ -251,32 +267,35 @@ func mark(dir string) error {
 	return file.Close()
 }
 
-// prune removes the host directories that are no longer in the domain list.
+// staleHosts lists the host directories that are no longer in the domain
+// list, and counts the hosts parked now: the stale ones plus the expected
+// ones already on disk.
 //
-// Only directories carrying the marker are touched, so an operator poking
+// Only directories carrying the marker are stale, so an operator poking
 // around in the output directory cannot have unrelated files deleted.
-func prune(outputDir string, expected map[string]bool) (int, error) {
+func staleHosts(outputDir string, expected map[string]bool) ([]string, int, error) {
 	entries, err := os.ReadDir(outputDir)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 
-	pruned := 0
+	var stale []string
+	parked := 0
 	for _, entry := range entries {
-		if expected[entry.Name()] || !entry.IsDir() {
+		if !entry.IsDir() {
 			continue
 		}
-		dir := filepath.Join(outputDir, entry.Name())
-		if _, err := os.Stat(filepath.Join(dir, marker)); errors.Is(err, fs.ErrNotExist) {
+		if expected[entry.Name()] {
+			parked++
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(outputDir, entry.Name(), marker)); errors.Is(err, fs.ErrNotExist) {
 			continue
 		} else if err != nil {
-			return pruned, err
+			return nil, 0, err
 		}
-		if err := os.RemoveAll(dir); err != nil {
-			return pruned, err
-		}
-		slog.Info("Pruned " + entry.Name())
-		pruned++
+		stale = append(stale, entry.Name())
+		parked++
 	}
-	return pruned, nil
+	return stale, parked, nil
 }

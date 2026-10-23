@@ -11,15 +11,19 @@ package adapter
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 )
 
-// CacheCapacity is the number of certificates Caddy keeps in memory, a few
-// kB each, so a few hundred MB when full. Only the certificates requested
-// since startup are loaded.
+// CacheCapacity is the default number of certificates Caddy keeps in
+// memory, a few kB each, so a few hundred MB when full. Only the
+// certificates requested since startup are loaded. CERT_CACHE_CAPACITY
+// overrides it.
 const CacheCapacity = 100_000
 
 func init() {
@@ -36,11 +40,28 @@ func (Adapter) Adapt(body []byte, options map[string]any) ([]byte, []caddyconfig
 		return nil, warnings, err
 	}
 
-	adapted, err = setCacheCapacity(adapted, CacheCapacity)
+	capacity, err := cacheCapacity()
+	if err != nil {
+		return nil, warnings, err
+	}
+	adapted, err = setCacheCapacity(adapted, capacity)
 	if err != nil {
 		return nil, warnings, fmt.Errorf("setting the certificate cache capacity: %w", err)
 	}
 	return adapted, warnings, nil
+}
+
+// cacheCapacity reads CERT_CACHE_CAPACITY, CacheCapacity when unset.
+func cacheCapacity() (int, error) {
+	raw := strings.TrimSpace(os.Getenv("CERT_CACHE_CAPACITY"))
+	if raw == "" {
+		return CacheCapacity, nil
+	}
+	capacity, err := strconv.Atoi(raw)
+	if err != nil || capacity < 1 {
+		return 0, fmt.Errorf("CERT_CACHE_CAPACITY must be a positive number of certificates, got %q", raw)
+	}
+	return capacity, nil
 }
 
 // setCacheCapacity sets apps.tls.cache.capacity. Everything else is passed

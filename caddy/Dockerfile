@@ -1,59 +1,54 @@
-# The server: Caddy built with our vendored certmagic-s3 storage backend and
-# our config adapter, on a distroless base.
+# The server: Caddy with only the modules main.go lists, our vendored
+# certmagic-s3 storage backend and our config adapter, on a distroless base.
 #
-# Context is this directory — the Caddyfile plus certmagic-s3/ and adapter/,
-# which are built from local source rather than fetched by version. See
-# certmagic-s3/VENDORED.md for the local changes on top of upstream.
+# Context is this directory: a Go module (go.mod, main.go, adapter/) with
+# certmagic-s3/ substituted by a replace directive, so what ships is what is
+# in the repo. See certmagic-s3/VENDORED.md for the local changes on top of
+# upstream.
 
-ARG CADDY_VERSION=2.11.7
-# The upstream tag certmagic-s3/ is forked from (VENDORED.md, "Forked at").
-# Only the version recorded in the binary: the code is the local directory.
-ARG CERTMAGIC_S3_VERSION=v1.5.0
-
-# Digests resolved on 2026-10-21.
-ARG CADDY_BUILDER_DIGEST=sha256:8910fe662f448b860e8d16ef1c9a4f8946d3193bdc3e971bf0c55c9a2cf246f6
-ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+# Digests resolved on 2026-10-21. GO_IMAGE is also pinned in the Makefile and
+# builder/Dockerfile.
+ARG GO_IMAGE=golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc
 ARG DISTROLESS_STATIC_IMAGE=gcr.io/distroless/static-debian13:nonroot@sha256:d62067879de890a1def9da0e7766b7d20810a5e5555cef8506b752437d7a3e88
 
-# ---- Build Caddy with the storage plugin ----
-FROM caddy:${CADDY_VERSION}-builder@${CADDY_BUILDER_DIGEST} AS build
-ARG CERTMAGIC_S3_VERSION
+FROM ${GO_IMAGE} AS build
 
 WORKDIR /src
-COPY certmagic-s3/ ./certmagic-s3/
-COPY adapter/ ./adapter/
+COPY go.mod go.sum ./
+COPY certmagic-s3/go.mod certmagic-s3/go.sum ./certmagic-s3/
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
-# `--with <module>=<dir>` rewrites the import to this directory, so what ships
-# is what is in the repo. Without `@<version>`, xcaddy's `go get` would record
-# whatever upstream's latest tag is at build time, and scanners match CVEs on
-# that. CGO stays off: the result has to run on distroless.
+COPY . ./
+# CGO stays off: the result has to run on distroless. The tags leave out code
+# nothing here can reach:
+# - nobadger, nomysql, nopgx, nobbolt: smallstep's database drivers, linked
+#   through the internal CA but used only by an ACME server we do not build.
+# - grpcnotrace: x/net/trace, which gRPC (via OpenTelemetry) would link.
+# - nethttpomithttp2: the standard library's HTTP/2. The server speaks HTTP/1.1
+#   only, and the S3 and ACME clients fall back to it. Any config that enables
+#   h2 now makes Caddy panic at startup, `caddy file-server` included.
 ENV CGO_ENABLED=0
-# The builder image exports CADDY_VERSION=v<version>, which xcaddy reads by default.
-RUN xcaddy build \
-    --output /out/caddy \
-    --with github.com/techknowlogick/certmagic-s3@${CERTMAGIC_S3_VERSION}=/src/certmagic-s3 \
-    --with github.com/suitenumerique/st-domain-parking/caddy/adapter=/src/adapter
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    go build -trimpath -ldflags='-s -w' \
+    -tags nobadger,nomysql,nopgx,nobbolt,grpcnotrace,nethttpomithttp2 -o /out/caddy .
 
-# Fail the build rather than the deployment if a module did not make it in.
-RUN /out/caddy list-modules | grep -qx 'caddy.storage.s3' \
-    && /out/caddy list-modules | grep -qx 'caddy.adapters.parking'
+# Fail the build rather than the deployment if the module set is not exactly
+# modules.txt: a module that did not make it in, or one that came in with a
+# dependency upgrade. Regenerate it with the same pipeline after reviewing.
+RUN /out/caddy list-modules | grep '^[a-z]' | sort | diff modules.txt -
 
-# distroless has no shell, so writable directories have to be created and
-# owned here.
-FROM ${DEBIAN_IMAGE} AS state
-RUN mkdir -p /state/data /state/config && chown -R 65532:65532 /state
+# distroless has no shell, so the data directory is created and owned here.
+RUN mkdir -p /state/data && chown -R 65532:65532 /state
 
 FROM ${DISTROLESS_STATIC_IMAGE}
 
 COPY --from=build /out/caddy /usr/bin/caddy
 COPY Caddyfile /etc/caddy/Caddyfile
-COPY --from=state --chown=65532:65532 /state/data /data
-COPY --from=state --chown=65532:65532 /state/config /config
+COPY --from=build --chown=65532:65532 /state/data /data
 
-# Certificates live in S3 (see the `storage` block in the Caddyfile), so these
-# hold only local scratch state. /config still receives the config autosave.
+# Certificates live in S3 (see the `storage` block in the Caddyfile) and the
+# config is not persisted, so /data holds only the instance ID.
 ENV XDG_DATA_HOME=/data
-ENV XDG_CONFIG_HOME=/config
 
 # Unprivileged, so the low ports are out of reach: publish them from the host
 # instead (`-p 80:8080 -p 443:8443`). Caddy emits port-less redirects, so the
