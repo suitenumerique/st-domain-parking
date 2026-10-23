@@ -13,13 +13,13 @@ Re-fetch every value at run time. Do not trust a version written in a doc.
 | --- | --- | --- |
 | `actions/checkout` SHA + `# vX.Y.Z` comment | `.github/workflows/ci.yml`, every `uses:` | `https://api.github.com/repos/actions/checkout/git/ref/tags/<tag>` (dereference an annotated tag through `git/tags/<sha>`) |
 | Debian and distroless bases | `builder/Dockerfile` and `caddy/Dockerfile`, the `ARG *_IMAGE=` lines | registry digests (see below) |
-| Caddy version and builder digest | `caddy/Dockerfile`, `ARG CADDY_VERSION`, `ARG CADDY_BUILDER_DIGEST` | GitHub releases of `caddyserver/caddy`; digest from Docker Hub |
+| Caddy version | `caddy/go.mod`, the `github.com/caddyserver/caddy/v2` require | GitHub releases of `caddyserver/caddy`, then `go mod tidy` in `caddy/` |
 | RustFS image | `compose.yaml`, `image: rustfs/rustfs:` | GitHub releases of `rustfs/rustfs`; digest from Docker Hub |
-| Go image | `Makefile` `GO_IMAGE`, `builder/Dockerfile` `ARG GO_IMAGE`, and the two `TESTING.md` examples | the `GOLANG_VERSION` env in the Caddy builder image config; digest from Docker Hub |
-| Builder module | `builder/go.mod`, the `go` directive and every require | `go get -u ./... && go mod tidy` in the Go image; the `go` directive follows the Caddy builder's Go |
-| Vendored module | `caddy/certmagic-s3/go.mod`, the `go` directive and the direct requires | `https://proxy.golang.org/<module>/@latest`; the `go` directive follows the Caddy builder's Go |
-| Config adapter module | `caddy/adapter/go.mod`, the `go` directive and the `caddy/v2` require | the `caddy/v2` require follows `CADDY_VERSION`, then `go mod tidy`; the `go` directive follows the Caddy builder's Go |
-| certmagic-s3 fork point | `caddy/certmagic-s3/VENDORED.md`, "Forked at", and `caddy/Dockerfile` `ARG CERTMAGIC_S3_VERSION` | `git ls-remote --tags https://github.com/techknowlogick/certmagic-s3` |
+| Go image | `Makefile` `GO_IMAGE`, `builder/Dockerfile` and `caddy/Dockerfile` `ARG GO_IMAGE`, and the two `TESTING.md` examples | latest `golang` release on Docker Hub, at least the `go` directive of Caddy's own `go.mod`; digest from Docker Hub |
+| Builder module | `builder/go.mod`, the `go` directive and every require | `go get -u ./... && go mod tidy` in the Go image; the `go` directive follows the Go image |
+| Vendored module | `caddy/certmagic-s3/go.mod`, the `go` directive and the direct requires | `https://proxy.golang.org/<module>/@latest`; the `go` directive follows the Go image |
+| Caddy module | `caddy/go.mod`, the `go` directive | follows the Go image; the direct requires follow "Caddy version" and "certmagic-s3 fork point", then `go mod tidy` |
+| certmagic-s3 fork point | `caddy/certmagic-s3/VENDORED.md`, "Forked at", and the `techknowlogick/certmagic-s3` require in `caddy/go.mod` | `git ls-remote --tags https://github.com/techknowlogick/certmagic-s3` |
 
 Image digest: `HEAD /v2/<repo>/manifests/<tag>` on the registry with
 `Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json`,
@@ -40,15 +40,19 @@ A registry can re-push a tag; a digest that moved is a legitimate update.
   hunks upstream absorbed, re-apply the rest with their tag, then
   `make vendor-update` (it runs `go get -u`, `go mod tidy`, vet and tests).
   Do not run `go mod download all`: it inflates `go.sum`. Update
-  `VENDORED.md`, the `caddy/Dockerfile` header, the certmagic-s3 paragraph
-  of `README.md`, and any test name quoted in `TESTING.md`.
+  `VENDORED.md`, the certmagic-s3 require in `caddy/go.mod`, the
+  certmagic-s3 paragraph of `README.md`, and any test name quoted in
+  `TESTING.md`.
+- `caddy/modules.txt`: after a Caddy upgrade the image build fails if the
+  set of registered modules changed. Do not just regenerate it. Tell the user
+  which modules appeared or went away, and why (`go mod why`), first.
 - `TESTING.md` quotes the Go image twice. Update both.
 
 ## Tests and the CVE gate
 
 `TESTING.md` is the reference. The full sweep is `make install`,
 `make lint-check`, `make test`, `make build`, `make vendor-test`,
-`make test-adapter`, `make test-e2e`. Run it on the clean tree first, then
+`make test-caddy`, `make test-e2e`. Run it on the clean tree first, then
 after each group of changes, so a failure points at one change.
 
 The grype gate is Tier 4 of `TESTING.md`: `grype docker:<image> --only-fixed --fail-on low`

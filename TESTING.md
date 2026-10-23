@@ -15,8 +15,7 @@ make install          # builds the images and pulls the Go image the other targe
 - **Docker** with Compose v2. Nothing else: every target below runs in a
   container, including the tests and the linters. If a command here works only
   after you install something on the host, that is a bug in the Makefile.
-- **~10 GB of free disk.** The Caddy image compiles Caddy from source with
-  xcaddy. A disk that fills mid-build fails late and blames the wrong thing —
+- **~10 GB of free disk.** The Caddy image compiles Caddy from source. A disk that fills mid-build fails late and blames the wrong thing —
   if a build dies confusingly, check `df -h` first.
 - **Ports 8080, 8443 and 9000 free**, or set `HTTP_BIND`, `HTTPS_BIND` and
   `S3_BIND`.
@@ -46,7 +45,7 @@ docker run --rm -v "$PWD/builder":/src -w /src \
 
 ```sh
 make vendor-test      # gofmt, go vet, go test -race
-make test-adapter     # the same, for the Caddy config adapter
+make test-caddy       # the same, for main.go, the config adapter and the TLS permission
 ```
 
 The `-race` matters: the storage plugin runs a refresher goroutine per held
@@ -81,10 +80,18 @@ and redirect to the configured target, on the root path and on a sub-path.
 It checks that `/__lbheartbeat__` answers 200 on both listeners, with and
 without the trailing slash, and also on a helpcenter host.
 It checks the Caddy logs: they contain access lines, no heartbeat path, and
-no SDK debug line.
+no SDK debug line. It checks the hardening: HTTP/1.1 only and no `Alt-Svc`,
+no keep-alive, 421 when the Host does not match the SNI, 405 for a POST, a
+404 rather than a redirect for an unknown host on HTTP, and no config
+autosave.
+
+The image build itself checks that the binary registers exactly the modules
+in `caddy/modules.txt`.
 
 It uses Caddy's internal CA (`CADDY_TLS_ISSUER=internal`), since no public DNS
-points at a laptop. Everything else is the real thing.
+points at a laptop. `scripts/e2e.compose.yaml` pins the DNS records instead,
+so the permission's DNS check runs for real: a parked host whose record
+points elsewhere is refused a certificate. Everything else is the real thing.
 
 To keep the stack up afterwards and poke at it:
 
@@ -96,7 +103,7 @@ docker compose down -v          # when you are done
 ## Full sweep
 
 ```sh
-make install && make lint-check && make test && make vendor-test && make test-adapter && make test-e2e
+make install && make lint-check && make test && make vendor-test && make test-caddy && make test-e2e
 ```
 
 Expect: `Valid configuration`, `ok  …builder`, `ok  …certmagic-s3`,

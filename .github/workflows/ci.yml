@@ -52,20 +52,20 @@ jobs:
       - name: Go tests
         run: make vendor-test
 
-  adapter:
-    name: Caddy config adapter
+  caddy:
+    name: Caddy build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Go tests
-        run: make test-adapter
+        run: make test-caddy
 
   e2e:
     name: End-to-end
     runs-on: ubuntu-latest
-    # Caddy is compiled from source with xcaddy, and the stack waits on
+    # Caddy is compiled from source, and the stack waits on
     # certificate issuance.
     timeout-minutes: 30
     steps:

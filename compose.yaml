@@ -64,10 +64,14 @@ services:
       # failure mode is "local HTTPS needs DNS", not "production quietly
       # serves untrusted certificates". `make test-e2e` sets it to internal.
       CADDY_TLS_ISSUER: ${CADDY_TLS_ISSUER:-}
-      # Empty disables the helpcenter redirect. Caddy reads both at request
-      # time, so a change needs a new container (`up -d`), not a reload.
+      # Empty disables the helpcenter redirect. Caddy reads both from its
+      # environment, so a change needs a new container (`up -d`), not a reload.
       HELPCENTER_REDIRECT_HOSTS: ${HELPCENTER_REDIRECT_HOSTS:-}
       HELPCENTER_REDIRECT_TARGET: ${HELPCENTER_REDIRECT_TARGET:-}
+      # The addresses the parked hosts' DNS must point at, space-separated.
+      # No certificate is ordered for a host with any record elsewhere. Empty
+      # skips the check: set it in production.
+      PUBLIC_IPS: ${PUBLIC_IPS:-}
       # Certificate storage. Empty S3_ENDPOINT means real AWS.
       S3_BUCKET: ${S3_BUCKET:-caddy-certs}
       S3_REGION: ${S3_REGION:-us-east-1}
@@ -78,8 +82,15 @@ services:
       S3_ENCRYPTION_KEY: ${S3_ENCRYPTION_KEY:-}
     volumes:
       - sites:/srv/sites:ro
-      # Certificates live in S3; this only holds Caddy's config autosave.
-      - caddy-config:/config
+    # The network-facing container gets nothing it does not use: no writable
+    # root, no capabilities (it listens on unprivileged ports as nonroot).
+    # /data only holds Caddy's instance ID.
+    read_only: true
+    tmpfs:
+      - /data:uid=65532,gid=65532,mode=0700,size=1m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
 
   # S3-compatible store, for local development and the end-to-end test only.
   rustfs:
@@ -97,5 +108,4 @@ services:
 
 volumes:
   sites:
-  caddy-config:
   rustfs-data:

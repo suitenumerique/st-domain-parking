@@ -1,0 +1,13 @@
+# End-to-end overrides: the DNS check runs against fixed records, since no
+# public DNS points at a test machine. Caddy resolves through /etc/hosts first.
+services:
+  caddy:
+    environment:
+      PUBLIC_IPS: 192.0.2.10
+    extra_hosts:
+      - www.brigny.fr:192.0.2.10
+      - brigny.fr:192.0.2.10
+      - help.example:192.0.2.10
+      - help-alt.example:192.0.2.10
+      # Parked, but pointing elsewhere: no certificate.
+      - www.sainte-anne-sur-vilaine.fr:198.51.100.1

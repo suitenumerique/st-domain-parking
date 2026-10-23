@@ -8,9 +8,10 @@ local disk.
 - Licence: Apache 2.0 (see `LICENSE`)
 
 The build keeps the module path as `github.com/techknowlogick/certmagic-s3`.
-An xcaddy `--with …@<tag>=<dir>` replacement substitutes this directory for it, so
-rebasing on upstream stays a plain diff. `<tag>` is `CERTMAGIC_S3_VERSION` in
-`caddy/Dockerfile`: keep it equal to the fork tag above.
+A `replace` in `caddy/go.mod` substitutes this directory for it, so rebasing
+on upstream stays a plain diff. Keep the version that `caddy/go.mod` requires
+equal to the fork tag above: it is what the binary reports, and what scanners
+match.
 
 ## Why vendored
 
